@@ -222,6 +222,81 @@ function assertListenSecurity() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 限流 / 防爆破（内存实现，按 IP；参数可用环境变量覆盖）
+//   PROXY_RATE_WINDOW_MS  失败统计窗口，默认 300000（5 分钟）
+//   PROXY_RATE_MAX_FAILS  窗口内最大鉴权失败次数，默认 5
+//   PROXY_RATE_BLOCK_MS   触发后封锁时长，默认 900000（15 分钟）
+//   PROXY_RATE_MAX_REQ    /v1/messages 每 IP 每分钟请求上限，默认 0 = 不限
+//   PROXY_TRUST_PROXY     =1 时信任 X-Forwarded-For（置于反代之后时启用）
+// ---------------------------------------------------------------------------
+const RATE_WINDOW_MS = parseInt(process.env.PROXY_RATE_WINDOW_MS || '300000', 10);
+const RATE_MAX_FAILS = parseInt(process.env.PROXY_RATE_MAX_FAILS || '5', 10);
+const RATE_BLOCK_MS = parseInt(process.env.PROXY_RATE_BLOCK_MS || '900000', 10);
+const RATE_MAX_REQ = parseInt(process.env.PROXY_RATE_MAX_REQ || '0', 10);
+const TRUST_PROXY = process.env.PROXY_TRUST_PROXY === '1';
+
+const rateState = new Map(); // ip -> { fails: number[], blockedUntil: number, reqs: number[] }
+
+function clientIp(req) {
+  if (TRUST_PROXY) {
+    const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    if (fwd) return fwd;
+  }
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+function rateEntry(ip) {
+  let e = rateState.get(ip);
+  if (!e) {
+    e = { fails: [], blockedUntil: 0, reqs: [] };
+    rateState.set(ip, e);
+    // 惰性清理：状态条目过多时丢弃已过期项，防止内存无限增长
+    if (rateState.size > 10000) {
+      const now = Date.now();
+      for (const [k, v] of rateState) {
+        if (now - (v.fails[v.fails.length - 1] || 0) > RATE_WINDOW_MS && now - (v.reqs[v.reqs.length - 1] || 0) > 60000 && (!v.blockedUntil || v.blockedUntil < now)) rateState.delete(k);
+      }
+    }
+  }
+  return e;
+}
+
+function pruneRateEntry(e, now) {
+  while (e.fails.length && now - e.fails[0] > RATE_WINDOW_MS) e.fails.shift();
+  while (e.reqs.length && now - e.reqs[0] > 60000) e.reqs.shift();
+}
+
+function isAuthBlocked(ip) {
+  const now = Date.now();
+  const e = rateEntry(ip);
+  pruneRateEntry(e, now);
+  if (e.blockedUntil && e.blockedUntil > now) return true;
+  if (e.blockedUntil && e.blockedUntil <= now) e.blockedUntil = 0;
+  return false;
+}
+
+function noteAuthFail(ip) {
+  const now = Date.now();
+  const e = rateEntry(ip);
+  pruneRateEntry(e, now);
+  e.fails.push(now);
+  if (e.fails.length >= RATE_MAX_FAILS) {
+    e.blockedUntil = now + RATE_BLOCK_MS;
+    e.fails = [];
+    log(`rate-limit: IP ${ip} 鉴权失败过多，封锁 ${Math.round(RATE_BLOCK_MS / 60000)} 分钟`);
+  }
+}
+
+function noteRequest(ip) {
+  if (!RATE_MAX_REQ) return false;
+  const now = Date.now();
+  const e = rateEntry(ip);
+  pruneRateEntry(e, now);
+  e.reqs.push(now);
+  return e.reqs.length > RATE_MAX_REQ;
+}
+
 // 组装上游请求头
 function upstreamHeaders(provider, clientAuth) {
   const headers = { 'Content-Type': 'application/json' };
@@ -810,9 +885,15 @@ const server = http.createServer(async (req, res) => {
   const rawUrl = req.url || '/';
   const pathname = rawUrl.split('?')[0];
   const apiKey = clientAuthOf(req);
+  const rip = clientIp(req);
 
+  // 防爆破：被封禁 IP 一律 429
+  if (isAuthBlocked(rip)) {
+    return sendJson(res, 429, { type: 'error', error: { type: 'rate_limit_error', message: 'too many requests; retry later' } });
+  }
   // 统一登录鉴权：若设置了 global.authToken，所有端点都需携带该令牌
   if (!requireAuth(req)) {
+    noteAuthFail(rip);
     return sendJson(res, 401, { type: 'error', error: { type: 'auth_error', message: '需要 Authorization: Bearer <global.authToken> 或 x-api-key 访问' } });
   }
 
@@ -855,6 +936,9 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { input_tokens: 0 });
   }
   if (req.method === 'POST' && pathname === '/v1/messages') {
+    if (noteRequest(rip)) {
+      return sendJson(res, 429, { type: 'error', error: { type: 'rate_limit_error', message: 'request rate limit exceeded' } });
+    }
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => handleMessages(req, res, body, apiKey));
