@@ -461,6 +461,15 @@ function sendJson(res, status, obj) {
 // ---------------------------------------------------------------------------
 // 上游调用（供应商化）
 // ---------------------------------------------------------------------------
+// 日志/错误透传脱敏：打码疑似密钥片段并截断，避免上游错误体泄露凭证
+function sanitizeUpstreamSnippet(text) {
+  return String(text || '')
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-****')
+    .replace(/Bearer\s+[A-Za-z0-9._-]{8,}/gi, 'Bearer ****')
+    .replace(/(?:ark-|ghp_)[A-Za-z0-9_-]{8,}/g, '$1****')
+    .slice(0, 200);
+}
+
 async function upstreamChat(body, provider, clientAuth) {
   const url = `${provider.baseUrl}/chat/completions`;
   const res = await fetch(url, {
@@ -471,7 +480,7 @@ async function upstreamChat(body, provider, clientAuth) {
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`upstream ${res.status}: ${text.slice(0, 500)}`);
+    throw new Error(`upstream ${res.status}: ${sanitizeUpstreamSnippet(text)}`);
   }
   return { status: res.status, text };
 }
@@ -563,7 +572,7 @@ async function handleMessages(req, res, rawBody, apiKey) {
     if (!upstreamRes.ok) {
       const t = await upstreamRes.text();
       clearTimeout(idleTimer);
-      sendJson(res, 502, { type: 'error', error: { type: 'api_error', message: `upstream ${upstreamRes.status}: ${t.slice(0, 300)}` } });
+      sendJson(res, 502, { type: 'error', error: { type: 'api_error', message: `upstream ${upstreamRes.status}: ${sanitizeUpstreamSnippet(t)}` } });
       return;
     }
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
@@ -944,8 +953,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Anthropic 侧
-  log(`REQ ${req.method} ${rawUrl} | x-api-key=${req.headers['x-api-key'] ? 'present' : 'none'} auth=${req.headers['authorization'] ? 'present' : 'none'} ua=${req.headers['user-agent']} xoc=${req.headers['x-opencode-client']}`);
+  // Anthropic 侧（日志只记 pathname，不带 query，避免泄露 URL 中的敏感参数）
+  log(`REQ ${req.method} ${pathname} | ip=${rip} x-api-key=${req.headers['x-api-key'] ? 'present' : 'none'} auth=${req.headers['authorization'] ? 'present' : 'none'} ua=${req.headers['user-agent']} xoc=${req.headers['x-opencode-client']}`);
 
   if (req.method === 'GET' && pathname === '/v1/models') {
     const act = activeProvider();
