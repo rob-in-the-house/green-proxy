@@ -204,6 +204,24 @@ function requireAuth(req) {
   return !!got && got === t;
 }
 
+// 判定监听地址是否回环
+function isLoopbackHost(host) {
+  if (!host) return true;
+  const h = String(host).toLowerCase();
+  if (h === 'localhost' || h === '::1' || h.startsWith('127.')) return true;
+  return false;
+}
+
+// 启动安全校验：非回环监听（对外暴露）且未设鉴权令牌 => fail-closed 拒绝启动
+function assertListenSecurity() {
+  const host = (inMemory.config && inMemory.config.global && inMemory.config.global.host) || '127.0.0.1';
+  if (!isLoopbackHost(host) && !authToken()) {
+    console.error('[green-proxy] 安全拒绝: 监听地址 ' + host + ' 非仅回环且未配置 authToken（global.authToken 或 PROXY_AUTH_TOKEN）。');
+    console.error('[green-proxy] 代理拒绝启动：对外监听必须配置鉴权令牌，防止无鉴权暴露。');
+    process.exit(1);
+  }
+}
+
 // 组装上游请求头
 function upstreamHeaders(provider, clientAuth) {
   const headers = { 'Content-Type': 'application/json' };
@@ -572,11 +590,24 @@ function readBody(req) {
   });
 }
 
+// 脱敏配置：GET /api/config 返回时对 apiKey 打码，避免泄露明文密钥
+function desensitizeConfig(cfg) {
+  const copy = JSON.parse(JSON.stringify(cfg));
+  const provs = Array.isArray(copy.providers) ? copy.providers : [];
+  for (const p of provs) {
+    if (p && typeof p.apiKey === 'string' && p.apiKey.length > 0) {
+      p.apiKey = p.apiKey.slice(0, 4) + '****' + p.apiKey.slice(-4);
+      p.apiKeyRedacted = true;
+    }
+  }
+  return copy;
+}
+
 async function handleApi(req, res, pathname) {
-  // GET /api/config
+  // GET /api/config —— 脱敏返回（避免泄露明文 apiKey）
   if (req.method === 'GET' && pathname === '/api/config') {
     const cfg = currentConfig() || inMemory.config;
-    return sendJson(res, 200, cfg);
+    return sendJson(res, 200, desensitizeConfig(cfg));
   }
 
   // PUT /api/config —— 面板保存（唯一的写盘点）
@@ -591,6 +622,14 @@ async function handleApi(req, res, pathname) {
       return sendJson(res, 400, { ok: false, message: 'providers 数组缺失' });
     }
     if (!body.global) body.global = {};
+    // 合入：前端对已保存(脱敏)的 apiKey 剔除该字段；对缺失 apiKey 的 provider 沿用内存旧 key，避免脱敏占位写盘破坏凭证
+    const prev = (inMemory.config && inMemory.config.providers) || [];
+    for (const nb of body.providers) {
+      if (nb && !('apiKey' in nb)) {
+        const old = prev.find((x) => x && x.id === nb.id);
+        if (old && old.apiKey) nb.apiKey = old.apiKey;
+      }
+    }
     // 写盘前轮转备份（覆盖式，1 份）
     try {
       if (fs.existsSync(CONFIG_PATH)) fs.copyFileSync(CONFIG_PATH, BACKUP_PATH);
@@ -643,7 +682,12 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, result);
   }
 
-  // POST /api/write-claude-settings —— 把选定 provider 写回 ~/.claude/settings.json
+  // POST /api/write-claude-settings —— 把选定 provider 写回 ~/.claude/settings.json（仅回环监听可用，避免外网覆盖他人 settings.json）
+  if (req.method === 'POST' && pathname === '/api/write-claude-settings') {
+    const lh = (inMemory.config && inMemory.config.global && inMemory.config.global.host) || '127.0.0.1';
+    if (!isLoopbackHost(lh)) {
+    return sendJson(res, 404, { ok: false, message: 'not_available: /api/write-claude-settings 仅回环监听可用' });
+    }
   if (req.method === 'POST' && pathname === '/api/write-claude-settings') {
     let body;
     try { body = JSON.parse(await readBody(req)); } catch { body = {}; }
@@ -658,6 +702,7 @@ async function handleApi(req, res, pathname) {
       return sendJson(res, 500, { ok: false, message: e.message });
     }
   }
+}
 
   return sendJson(res, 404, { ok: false, message: 'unknown api: ' + req.method + ' ' + pathname });
 }
@@ -826,6 +871,7 @@ function start() {
   inMemory.port = inMemory.config.global.port || 18101;
   refreshActiveProvider();
   const act = activeProvider();
+  assertListenSecurity();
 
   server.listen(inMemory.port, inMemory.config.global.host || '127.0.0.1', () => {
     const addr = server.address();

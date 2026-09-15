@@ -437,7 +437,7 @@ function render() {
         <div class="form-group full">
           <label class="form-label">API Key</label>
           <div class="input-row">
-            <input class="form-input mono" id="f-apiKey" type="password" value="${esc(sp.apiKey)}" oninput="updateField('apiKey', this.value)" placeholder="sk-...">
+            <input class="form-input mono" id="f-apiKey" type="password" value="${sp.apiKeyRedacted ? '' : esc(sp.apiKey)}" oninput="updateField('apiKey', this.value)" placeholder="${sp.apiKeyRedacted ? '（已保存 ****，留空则不修改）' : 'sk-...'}">
             <button class="btn-icon" onclick="toggleKeyVis()" id="btn-eye">👁</button>
           </div>
         </div>
@@ -531,6 +531,9 @@ function updateField(field, value) {
     return;
   }
   p[field] = value;
+  if (field === 'apiKey' && value) {
+    p.apiKeyRedacted = false;
+  }
 }
 
 function toggleKeyVis() {
@@ -567,6 +570,12 @@ async function testProvider(id) {
 }
 
 async function persist() {
+  // 剔除未改动的脱敏 apiKey（apiKeyRedacted 且值含 '****'）→ 让后端沿用旧 key，避免脱敏占位写盘破坏凭证
+  for (const p of editedConfig.providers) {
+    if (p && p.apiKeyRedacted && typeof p.apiKey === 'string' && p.apiKey.includes('****')) {
+      delete p.apiKey;
+    }
+  }
   // 将当前 editedConfig 提交到服务端并重新同步本地状态
   const r = await api('PUT', '/api/config', editedConfig);
   if (!r.ok) throw new Error(r.message || '保存失败');
