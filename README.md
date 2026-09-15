@@ -209,3 +209,19 @@ PowerShell 5.1 `Set-Content -Encoding UTF8` 写**带 BOM 的 UTF-8**，Node `JSO
 - 代理仅监听 `127.0.0.1`，外部无法访问
 - 切换供应商前建议先在控制台「测试连接」验证
 - 不用 PowerShell 手改 config.json（见上文坑 #4）
+
+## 安全加固（公网部署）
+
+### 内置安全机制
+
+- **非回环监听强制鉴权**：`global.host` 设为非回环地址（如 `0.0.0.0`）且未配置 `global.authToken`（或环境变量 `PROXY_AUTH_TOKEN`）时，代理**拒绝启动**并给出明确提示（fail-closed）。
+- **配置读取脱敏**：`GET /api/config` 返回的 `apiKey` 一律打码为 `前4位+****+后4位`；控制台保存时未改动的 key 自动沿用旧值，不会被脱敏占位覆盖。
+- **settings.json 写入限制**：`POST /api/write-claude-settings` 仅在回环监听（`127.0.0.1` / `localhost` / `::1`）下可用，非回环监听一律返回 404。
+
+### 公网部署建议
+
+1. **必须**设置高强度 `global.authToken`（建议 ≥20 位随机串）。
+2. **必须**前置 HTTPS 反向代理（Nginx / Caddy）做 TLS 终止，不要裸 HTTP 对公网。
+3. 建议在反代层叠加 IP 白名单 / mTLS / 限流。
+4. 用低权限账号运行代理进程；`config.json` 仅对运行账号可读。
+5. 个人/小团队更优解：SSH 隧道 / Tailscale 内网穿透，而非直接开放公网端口。
