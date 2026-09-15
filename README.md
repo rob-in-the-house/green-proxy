@@ -162,6 +162,15 @@ PowerShell 5.1 `Set-Content -Encoding UTF8` 写**带 BOM 的 UTF-8**，Node `JSO
 | `RELOAD_MODE` | `cache`（默认，控制台保存即生效）/ `disk`（每请求读盘，防御手改文件） |
 | `PROXY_BASE` | bubble-test.py 用的代理地址（默认 `http://127.0.0.1:18101`） |
 | `MODEL` | bubble-test.py 覆盖 model（默认 `deepseek-v4-flash`） |
+| `PROXY_AUTH_TOKEN` | 环境变量形式的访问令牌，优先于 config.json 的 `global.authToken` |
+| `PROXY_RATE_WINDOW_MS` | 鉴权失败统计窗口毫秒（默认 300000 = 5 分钟） |
+| `PROXY_RATE_MAX_FAILS` | 窗口内最大鉴权失败次数，超过即封锁（默认 5） |
+| `PROXY_RATE_BLOCK_MS` | 触发后封锁时长毫秒（默认 900000 = 15 分钟），封锁期一律 429 |
+| `PROXY_RATE_MAX_REQ` | `/v1/messages` 每 IP 每分钟请求上限（默认 0 = 不限） |
+| `PROXY_TRUST_PROXY` | `1` = 信任 `X-Forwarded-For` 取真实客户端 IP（置于反代之后时启用） |
+| `PROXY_MAX_BODY` | `/v1/messages` 请求体上限字节（默认 10485760 = 10MB，超限 413） |
+| `PROXY_UPSTREAM_TIMEOUT` | 非流式上游总超时毫秒（默认 120000） |
+| `PROXY_STREAM_IDLE_TIMEOUT` | 流式空闲超时毫秒，超时无数据断开（默认 60000） |
 
 ## 公网部署鉴权（登录鉴权）
 
@@ -225,3 +234,36 @@ PowerShell 5.1 `Set-Content -Encoding UTF8` 写**带 BOM 的 UTF-8**，Node `JSO
 3. 建议在反代层叠加 IP 白名单 / mTLS / 限流。
 4. 用低权限账号运行代理进程；`config.json` 仅对运行账号可读。
 5. 个人/小团队更优解：SSH 隧道 / Tailscale 内网穿透，而非直接开放公网端口。
+
+### 反向代理示例（TLS 终止）
+
+Caddy（自动 HTTPS，最简）：
+
+```Caddyfile
+gpt.example.com {
+    reverse_proxy 127.0.0.1:18101 {
+        flush_interval -1    # SSE 流式必需：关闭响应缓冲
+    }
+}
+```
+
+Nginx：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name gpt.example.com;
+    # ssl_certificate / ssl_certificate_key 按需配置
+
+    location / {
+        proxy_pass http://127.0.0.1:18101;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header X-Forwarded-For $remote_addr;   # 配合 PROXY_TRUST_PROXY=1
+        proxy_buffering off;                             # SSE 流式必需：关闭缓冲
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+> 反代之后请设置环境变量 `PROXY_TRUST_PROXY=1`，限流/防爆破将按 `X-Forwarded-For` 的真实客户端 IP 统计（仅当反代正确设置该头时启用，否则保持默认以免伪造绕过）。
