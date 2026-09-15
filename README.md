@@ -15,16 +15,20 @@ Claude Code 只讲 **Anthropic Messages API**（`POST {base}/v1/messages` + `x-a
 |--------|----------|---------------|------|
 | **Codex Zen (big-pickle)** | `https://opencode.ai/zen/v1` | `big-pickle` | opencode 内置免费模型；**必须带 `x-opencode-session` 头**（代理已自动注入） |
 | **DeepSeek 官方** | `https://api.deepseek.com/v1` | `deepseek-v4-flash` / `deepseek-v4-pro` / `deepseek-chat` / `deepseek-reasoner` | 官方 API，OpenAI 兼容 |
-| **火山方舟 ARK** | `https://ark.cn-beijing.volces.com/api/v3` | 填 Endpoint ID (ep-xxxx) | 商业多模型 |
-| **火山 Coding (v4 系列)** | `https://ark.cn-beijing.volces.com/api/coding/v3` | `deepseek-v4-flash` / `deepseek-v4-pro` | 火山 Coding 计划网关 |
-| **通用 OpenAI 兼容** | 用户自填 | 用户自填 | 任意 OpenAI 兼容端点 / 中转网关 |
+| **火山方舟 ARK** | `https://ark.cn-beijing.volces.com/api/v3`（标准）<br>`https://ark.cn-beijing.volces.com/api/coding/v3`（Coding） | Endpoint ID (ep-xxxx) 或 `deepseek-v4-flash` / `deepseek-v4-pro` | 火山引擎网关：标准 v3 与 Coding 计划双端点，同一供应商 |
+| **Agnes** | `https://apihub.agnes-ai.com/v1` | 如 `agnes-3.0-flash` | Agnes APIhub，OpenAI 兼容 |
+| **腾讯混元** | `https://tokenhub.tencentmaas.com/v1` | 如 `hy3` | 腾讯混元 MaaS，OpenAI 兼容 |
+| **硅基流动 SiliconFlow** | `https://api.siliconflow.cn/v1` | 如 `Qwen/Qwen3.5-4B` | 硅基流动，OpenAI 兼容 |
+| **OpenRouter** | `https://openrouter.ai/api/v1` | 任意 OpenRouter 模型名 | 聚合网关，OpenAI 兼容 |
+| **通用 OpenAI 兼容 / 自建** | 用户自填 | 用户自填 | 任意 OpenAI 兼容端点 / 中转网关 / 自托管网关 |
 
 ## 快速开始
 
 ### 启动
 
 ```
-双击 start.cmd   （或 PowerShell 执行 .\start-proxy.ps1）
+Windows：双击 start.cmd
+Linux / macOS：./start.sh
 ```
 
 - 后台静默启动 Node 代理，自动打开浏览器控制台 `http://127.0.0.1:18101/console`
@@ -33,7 +37,8 @@ Claude Code 只讲 **Anthropic Messages API**（`POST {base}/v1/messages` + `x-a
 ### 停止
 
 ```
-双击 stop.cmd    （或 PowerShell 执行 .\stop-proxy.ps1）
+Windows：双击 stop.cmd
+Linux / macOS：./stop.sh
 ```
 
 ### 无需安装
@@ -46,20 +51,15 @@ Claude Code 只讲 **Anthropic Messages API**（`POST {base}/v1/messages` + `x-a
 ```
 claude代理/
 ├── proxy.mjs             # 多供应商桥接代理（核心，唯一入口）
-├── config.json           # 运行时配置（端口 + 供应商列表，控制台写入）
+├── config.json           # 运行时配置（端口 + 供应商列表，控制台写入；含真实 Key 不入库）
+├── config.sample.json    # 脱敏配置模板（复制为 config.json 后填入真实 Key）
 ├── console/index.html    # Web 控制台界面（代理实时读盘伺服，改完刷新即生效）
-├── start.cmd             # 双击启动（后台 + 打开浏览器）
-├── stop.cmd              # 双击停止
-├── start-proxy.ps1       # PowerShell 启动脚本
-├── stop-proxy.ps1        # PowerShell 停止脚本
-├── bubble-test.py        # Claude 风格请求冒泡排序测试脚本（走本地代理）
+├── start.cmd             # Windows 双击启动（后台 + 打开浏览器）
+├── stop.cmd              # Windows 双击停止
+├── start.sh              # Linux / macOS 启动脚本（nohup 后台，日志 logs/proxy.log）
+├── stop.sh               # Linux / macOS 停止脚本
 ├── README.md             # 本文件
-├── USAGE.md              # 控制台详细操作手册
-└── legacy/               # 原始单供应商版 claude-zen-proxy.mjs 归档
-    ├── claude-zen-proxy.mjs
-    ├── start-proxy.ps1 / stop-proxy.ps1   # legacy 启停（默认独立端口 18102）
-    ├── env-backup.json
-    └── proxy.log
+└── USAGE.md              # 控制台详细操作手册
 ```
 
 ## 使用步骤
@@ -202,17 +202,6 @@ PowerShell 5.1 `Set-Content -Encoding UTF8` 写**带 BOM 的 UTF-8**，Node `JSO
 5. **Claude 仍报旧模型错误** → 在 Claude Code 里 `/clear` 或重启会话，让新配置生效
 6. **后台进程莫名消失 / `ChildProcess.kill`** → opencode 等 shell 包装层会连带杀掉 Start-Process 的后台子进程；改用 `start.cmd` 双击启动，或确认 `node proxy.mjs` 进程存活
 7. **ARK 模型填什么** → 火山方舟控制台创建 Endpoint，模型 ID 格式 `ep-20240101xxxxx`；v4 系列走 Coding 网关用模型名即可
-
-## legacy 归档目录
-
-`legacy/` 保留原始单供应商版（仅转发到 `opencode.ai/zen/v1`）。如需临时回退：
-
-```
-legacy\start-proxy.ps1   # 默认独立端口 18102，避免与主代理 18101 冲突
-legacy\stop-proxy.ps1
-```
-
-legacy 的 start 脚本会自动从父目录 `config.json` 读取 opencode API Key 作为 `FIXED_KEY`（读不到则需手动设 `$env:FIXED_KEY`）。
 
 ## 安全注意
 

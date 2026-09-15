@@ -26,7 +26,7 @@
 | **Node.js** | v18 或更高 | 运行代理核心（下载：https://nodejs.org/） |
 | **浏览器** | Chrome / Edge / Firefox | 打开控制台界面（自动调用） |
 | **Claude Code** | 任意版本 | Claude Code CLI 客户端 |
-| **操作系统** | Windows / macOS / Linux | 主要测试 Windows，其他系统理论可用 |
+| **操作系统** | Windows / macOS / Linux | Windows 用 cmd 脚本；Linux/macOS 用 bash 脚本（start.sh / stop.sh） |
 
 **无需安装：** 不需要 npm install，不需要额外依赖包。绿色文件夹，拷贝即用。
 
@@ -37,7 +37,8 @@
 ### 第一步：双击启动
 
 ```
-双击 start.cmd（Windows）
+Windows：双击 start.cmd
+Linux / macOS：终端执行 ./start.sh
 ```
 
 启动后会自动：
@@ -69,7 +70,8 @@ claude   # 正常使用，自动走代理
 ### 停止代理
 
 ```
-双击 stop.cmd
+Windows：双击 stop.cmd
+Linux / macOS：./stop.sh
 ```
 
 ---
@@ -386,15 +388,15 @@ netstat -ano | findstr 18101
 | 文件 | 作用 |
 |------|------|
 | `proxy.mjs` | 代理核心程序（零依赖 Node，供应商抽象层 + Anthropic↔OpenAI 转换） |
-| `config.json` | 运行时配置（端口 + 供应商列表，保存 API Key） |
+| `config.json` | 运行时配置（端口 + 供应商列表，保存 API Key；含真实 Key 不入库，本地生成） |
+| `config.sample.json` | 脱敏配置模板（复制为 `config.json` 后填入真实 Key） |
 | `console/index.html` | Web 控制台界面（浏览器打开，零 CDN 离线可用） |
 | `start.cmd` | Windows 双击启动（后台运行 + 自动开浏览器） |
 | `stop.cmd` | Windows 双击停止（按端口杀进程） |
-| `start-proxy.ps1` | PowerShell 启动脚本（高级参数支持） |
-| `stop-proxy.ps1` | PowerShell 停止脚本 |
+| `start.sh` | Linux/macOS 启动脚本（nohup 后台，日志 logs/proxy.log） |
+| `stop.sh` | Linux/macOS 停止脚本（按端口杀进程） |
 | `README.md` | 项目简介和快速参考 |
 | `USAGE.md` | 本使用说明 |
-| `legacy/` | 原始 claude-zen-proxy.mjs 备份（可删除） |
 
 ---
 

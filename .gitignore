@@ -4,6 +4,7 @@ config.backup.json
 config.corrupt.*
 *.tmp
 *.log
+logs/
 .claude/
 
 # 本地测试脚本（含内网端点/内部引用）
