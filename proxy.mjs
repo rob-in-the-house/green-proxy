@@ -16,6 +16,11 @@ const CONSOLE_INDEX = path.join(CONSOLE_DIR, 'index.html');
 // 可选：RELOAD_MODE='cache'（默认，读内存，面板保存后即时生效）| 'disk'（每请求读盘，防御手工改文件）
 const RELOAD_MODE = (process.env.RELOAD_MODE || 'cache').toLowerCase();
 
+// 请求体上限与上游超时（B2，可用环境变量覆盖）
+const MAX_BODY_BYTES = parseInt(process.env.PROXY_MAX_BODY || String(10 * 1024 * 1024), 10);      // /v1/messages body 上限，默认 10MB
+const UPSTREAM_TIMEOUT_MS = parseInt(process.env.PROXY_UPSTREAM_TIMEOUT || '120000', 10);         // 非流式上游总超时，默认 120s
+const STREAM_IDLE_TIMEOUT_MS = parseInt(process.env.PROXY_STREAM_IDLE_TIMEOUT || '60000', 10);    // 流式空闲超时（无数据断开），默认 60s
+
 // ---------------------------------------------------------------------------
 // 默认播种配置（首次无 config.json 时写入）
 // ---------------------------------------------------------------------------
@@ -462,6 +467,7 @@ async function upstreamChat(body, provider, clientAuth) {
     method: 'POST',
     headers: upstreamHeaders(provider, clientAuth),
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   });
   const text = await res.text();
   if (!res.ok) {
@@ -539,15 +545,24 @@ async function handleMessages(req, res, rawBody, apiKey) {
   }
 
   // Streaming: forward OpenAI SSE, convert chunks to Anthropic SSE-ish
+  // 流式空闲超时：每收到数据重置计时，超过 STREAM_IDLE_TIMEOUT_MS 无数据则中止，防悬挂连接
+  const streamAbort = new AbortController();
+  let idleTimer = setTimeout(() => streamAbort.abort(new Error(`stream idle over ${STREAM_IDLE_TIMEOUT_MS}ms`)), STREAM_IDLE_TIMEOUT_MS);
+  const bumpIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => streamAbort.abort(new Error(`stream idle over ${STREAM_IDLE_TIMEOUT_MS}ms`)), STREAM_IDLE_TIMEOUT_MS);
+  };
   try {
     const url = `${provider.baseUrl}/chat/completions`;
     const upstreamRes = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(openaiBody),
+      signal: streamAbort.signal,
     });
     if (!upstreamRes.ok) {
       const t = await upstreamRes.text();
+      clearTimeout(idleTimer);
       sendJson(res, 502, { type: 'error', error: { type: 'api_error', message: `upstream ${upstreamRes.status}: ${t.slice(0, 300)}` } });
       return;
     }
@@ -576,6 +591,7 @@ async function handleMessages(req, res, rawBody, apiKey) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      bumpIdle();
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split('\n');
       buf = lines.pop();
@@ -632,6 +648,8 @@ async function handleMessages(req, res, rawBody, apiKey) {
         }
       }
     }
+    // 流正常结束，清理空闲计时器
+    clearTimeout(idleTimer);
     // message_delta (stop)
     res.write(sseEncode({
       type: 'message_delta',
@@ -642,6 +660,7 @@ async function handleMessages(req, res, rawBody, apiKey) {
     res.end();
     log('stream done, chars:', full.length, 'tools:', openedTools.size);
   } catch (e) {
+    clearTimeout(idleTimer);
     log('stream upstream error:', e.message);
     if (!res.headersSent) sendJson(res, 502, { type: 'error', error: { type: 'api_error', message: e.message } });
     else res.end();
@@ -940,8 +959,16 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 429, { type: 'error', error: { type: 'rate_limit_error', message: 'request rate limit exceeded' } });
     }
     let body = '';
-    req.on('data', (c) => { body += c; });
-    req.on('end', () => handleMessages(req, res, body, apiKey));
+    let tooLarge = false;
+    req.on('data', (c) => {
+      body += c;
+      if (!tooLarge && body.length > MAX_BODY_BYTES) {
+        tooLarge = true;
+        sendJson(res, 413, { type: 'error', error: { type: 'request_too_large', message: `request body exceeds ${MAX_BODY_BYTES} bytes` } });
+        req.destroy();
+      }
+    });
+    req.on('end', () => { if (!tooLarge) handleMessages(req, res, body, apiKey); });
     return;
   }
   sendJson(res, 404, { type: 'error', error: { type: 'not_found_error', message: `not found: ${req.method} ${rawUrl}` } });
