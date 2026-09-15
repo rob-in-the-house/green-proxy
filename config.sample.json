@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "global": {
+    "port": 18101,
+    "host": "127.0.0.1",
+    "autoOpenBrowser": true,
+    "authToken": ""
+  },
+  "activeProviderId": "opencode",
+  "providers": [
+    {
+      "id": "opencode",
+      "name": "Codex Zen (big-pickle)",
+      "enabled": true,
+      "type": "predefined",
+      "baseUrl": "https://opencode.ai/zen/v1",
+      "authType": "bearer",
+      "apiKey": "sk-XXXX-REPLACE-ME",
+      "model": "big-pickle",
+      "extraHeaders": {
+        "User-Agent": "opencode/latest/1.18.18/cli",
+        "x-opencode-client": "cli"
+      },
+      "notes": "内置预设（原 claude-zen-proxy）"
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek V4 Flash (自建)",
+      "enabled": true,
+      "type": "generic",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "authType": "bearer",
+      "apiKey": "sk-XXXX-REPLACE-ME",
+      "model": "deepseek-chat",
+      "extraHeaders": {},
+      "notes": "自建/自托管，OpenAI 兼容"
+    },
+    {
+      "id": "generic",
+      "name": "通用 OpenAI 兼容",
+      "enabled": true,
+      "type": "generic",
+      "baseUrl": "",
+      "authType": "bearer",
+      "apiKey": "sk-XXXX-REPLACE-ME",
+      "model": "",
+      "extraHeaders": {},
+      "notes": "任意 OpenAI 兼容端点"
+    }
+  ]
+}

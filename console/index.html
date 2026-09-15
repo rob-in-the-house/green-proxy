@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Green Proxy 控制台</title>
+<style>
+  :root {
+    --bg: #f5f7fa;
+    --card: #ffffff;
+    --primary: #1a73e8;
+    --primary-hover: #1557b0;
+    --success: #0f9d58;
+    --success-bg: #e6f4ea;
+    --error: #d93025;
+    --error-bg: #fce8e6;
+    --warning: #f9ab00;
+    --warning-bg: #fef7e0;
+    --text: #202124;
+    --text-sec: #5f6368;
+    --border: #dadce0;
+    --border-active: #1a73e8;
+    --radius: 10px;
+    --shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
+    --shadow-lg: 0 4px 12px rgba(0,0,0,.1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+  .container { max-width: 900px; margin: 0 auto; padding: 20px; }
+
+  /* Header */
+  .header {
+    background: linear-gradient(135deg, #1a73e8, #4285f4);
+    color: white;
+    padding: 24px 32px;
+    border-radius: var(--radius);
+    margin-bottom: 20px;
+    box-shadow: var(--shadow-lg);
+  }
+  .header h1 { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+  .header .sub { font-size: 13px; opacity: .85; }
+  .header .status-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+  .status-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 6px;
+  }
+  .status-dot.on { background: #a8ff78; box-shadow: 0 0 6px #a8ff78; }
+  .status-dot.off { background: #ff6b6b; }
+  .status-badge {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    background: rgba(255,255,255,.2);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* Section */
+  .section {
+    background: var(--card);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 24px;
+    margin-bottom: 16px;
+  }
+  .section-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .section-title .icon { font-size: 18px; }
+
+  /* Provider Cards */
+  .provider-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+  }
+  .provider-card {
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    cursor: pointer;
+    transition: all .15s;
+    position: relative;
+  }
+  .provider-card:hover { border-color: var(--primary); background: #f0f6ff; }
+  .provider-card.selected { border-color: var(--primary); background: #e8f0fe; box-shadow: 0 0 0 1px var(--primary); }
+  .provider-card .radio {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all .15s;
+  }
+  .provider-card.selected .radio {
+    border-color: var(--primary);
+  }
+  .provider-card.selected .radio::after {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--primary);
+  }
+  .provider-card .name {
+    font-weight: 600;
+    font-size: 14px;
+    margin-bottom: 4px;
+    padding-right: 24px;
+  }
+  .provider-card .meta {
+    font-size: 12px;
+    color: var(--text-sec);
+  }
+  .provider-card .tag {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-top: 6px;
+  }
+  .tag-preset { background: #e8f0fe; color: var(--primary); }
+  .tag-generic { background: #fef7e0; color: #b06000; }
+  .tag-active { background: var(--success-bg); color: var(--success); }
+
+  /* Form */
+  .form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .form-group { display: flex; flex-direction: column; gap: 4px; }
+  .form-group.full { grid-column: 1 / -1; }
+  .form-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-sec);
+    text-transform: uppercase;
+    letter-spacing: .3px;
+  }
+  .form-input {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: inherit;
+    transition: border-color .15s;
+    outline: none;
+  }
+  .form-input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(26,115,232,.15); }
+  .form-input.mono { font-family: 'Consolas', 'SF Mono', monospace; font-size: 13px; }
+  .input-row { display: flex; gap: 8px; align-items: center; }
+  .input-row .form-input { flex: 1; }
+  .btn-icon {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: white;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-sec);
+    transition: all .15s;
+  }
+  .btn-icon:hover { background: #f1f3f4; }
+  .form-check { display: flex; align-items: center; gap: 6px; }
+  .form-check input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--primary); }
+
+  /* Buttons */
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+  .btn {
+    padding: 8px 20px;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all .15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-primary { background: var(--primary); color: white; }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+  .btn-success { background: var(--success); color: white; }
+  .btn-success:hover:not(:disabled) { background: #0b8043; }
+  .btn-outline {
+    background: white;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-outline:hover:not(:disabled) { background: #f1f3f4; }
+  .btn-danger { background: var(--error); color: white; }
+  .btn-danger:hover:not(:disabled) { background: #b3261e; }
+
+  /* Result box */
+  .result {
+    margin-top: 12px;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: 'Consolas', 'SF Mono', monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+    display: none;
+  }
+  .result.ok { display: block; background: var(--success-bg); color: #0d652d; border: 1px solid #ceead6; }
+  .result.fail { display: block; background: var(--error-bg); color: #a50e0e; border: 1px solid #f5c6cb; }
+  .result.info { display: block; background: #e8f0fe; color: #174ea6; border: 1px solid #c2d7f5; }
+
+  /* Provider table */
+  .table-wrap { overflow-x: auto; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th, td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th { font-weight: 600; color: var(--text-sec); font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
+  tr:hover td { background: #f8f9fa; }
+  .active-row td { background: var(--success-bg); }
+  .table-actions { display: flex; gap: 6px; }
+  .btn-sm {
+    padding: 4px 10px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: white;
+    cursor: pointer;
+    transition: all .12s;
+  }
+  .btn-sm:hover { background: #f1f3f4; }
+  .btn-sm.danger { color: var(--error); border-color: #f5c6cb; }
+  .btn-sm.danger:hover { background: var(--error-bg); }
+
+  /* Footer */
+  .footer {
+    text-align: center;
+    padding: 20px;
+    font-size: 12px;
+    color: var(--text-sec);
+  }
+  .footer a { color: var(--primary); text-decoration: none; }
+  .footer a:hover { text-decoration: underline; }
+
+  /* Spinner */
+  .spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255,255,255,.3);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin .6s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Loading overlay */
+  .loading {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-sec);
+  }
+
+  @media (max-width: 600px) {
+    .form-grid { grid-template-columns: 1fr; }
+    .provider-cards { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="container" id="app">
+  <div class="loading">加载中...</div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let CONFIG = null;
+let STATUS = null;
+let selectedId = null; // 当前编辑的 provider id
+let editedConfig = null; // 用户编辑中的 config 副本
+
+// ---------------------------------------------------------------------------
+// API helpers
+// ---------------------------------------------------------------------------
+const AUTH_TOKEN_KEY = 'green_proxy_auth_token';
+
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  const tok = localStorage.getItem(AUTH_TOKEN_KEY);
+  if (tok) opts.headers['Authorization'] = 'Bearer ' + tok;
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opts);
+  if (r.status === 401) throw new Error('登录鉴权失败：请在下方输入 global.authToken');
+  return r.json();
+}
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+async function init() {
+  try {
+    [STATUS, CONFIG] = await Promise.all([
+      api('GET', '/api/status'),
+      api('GET', '/api/config'),
+    ]);
+    selectedId = CONFIG.activeProviderId || (CONFIG.providers[0] && CONFIG.providers[0].id);
+    editedConfig = JSON.parse(JSON.stringify(CONFIG));
+  } catch (e) {
+    document.getElementById('app').innerHTML =
+      '<div class="section"><h2>需要登录</h2>' +
+      '<p>代理已开启公网登录鉴权，请填写访问令牌（config.json 的 global.authToken）：</p>' +
+      '<div class="input-row"><input class="form-input mono" id="login-token" type="password" placeholder="输入 authToken"></div>' +
+      '<div class="actions"><button class="btn btn-primary" onclick="saveAuthToken()">🔑 登录</button></div>' +
+      '<div class="result fail" id="login-result"></div></div>';
+    return;
+  }
+  render();
+}
+
+function saveAuthToken() {
+  const inp = document.getElementById('login-token');
+  const el = document.getElementById('login-result');
+  localStorage.setItem(AUTH_TOKEN_KEY, (inp.value || '').trim());
+  init();
+}
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = String(s ?? '');
+  return d.innerHTML;
+}
+
+function fmtUptime(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm ' + (s % 60) + 's';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+
+function render() {
+  const ap = STATUS.activeProvider;
+  const providers = editedConfig.providers || [];
+  const activeId = editedConfig.activeProviderId;
+
+  let html = '';
+
+  // Header
+  html += `<div class="header">
+    <h1>🟢 Green Proxy 控制台</h1>
+    <div class="sub">多供应商 Claude Code 桥接代理</div>
+    <div class="status-row">
+      <span class="status-badge"><span class="status-dot on"></span>运行中</span>
+      <span class="status-badge">端口 ${esc(STATUS.port)}</span>
+      <span class="status-badge">当前: ${esc(ap ? ap.name : '无')}</span>
+      <span class="status-badge">模型: ${esc(ap ? ap.model : '-')}</span>
+      <span class="status-badge">已运行 ${fmtUptime(STATUS.uptimeMs)}</span>
+    </div>
+  </div>`;
+
+  // Provider Cards
+  html += `<div class="section">
+    <div class="section-title"><span class="icon">🔀</span> 切换供应商</div>
+    <div class="provider-cards">`;
+  for (const p of providers) {
+    const isActive = p.id === activeId;
+    const isSelected = p.id === selectedId;
+    const cls = 'provider-card' + (isSelected ? ' selected' : '');
+    html += `<div class="${cls}" onclick="selectProvider('${esc(p.id)}')">
+      <div class="radio"></div>
+      <div class="name">${esc(p.name || p.id)}</div>
+      <div class="meta">${esc(p.model || '未配置模型')}</div>
+      <div class="meta">${esc(p.baseUrl ? p.baseUrl.substring(0, 35) + (p.baseUrl.length > 35 ? '...' : '') : '未配置地址')}</div>
+      <span class="tag tag-${p.type === 'predefined' ? 'preset' : 'generic'}">${p.type === 'predefined' ? '预设' : '通用'}</span>
+      ${isActive ? ' <span class="tag tag-active">当前使用</span>' : ''}
+    </div>`;
+  }
+  html += `</div></div>`;
+
+  // Provider Editor
+  const sp = providers.find(x => x.id === selectedId);
+  if (sp) {
+    html += `<div class="section">
+      <div class="section-title"><span class="icon">✏️</span> 编辑: ${esc(sp.name || sp.id)}</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label">名称</label>
+          <input class="form-input" id="f-name" value="${esc(sp.name)}" oninput="updateField('name', this.value)">
+        </div>
+        <div class="form-group">
+          <label class="form-label">ID (标识符)</label>
+          <input class="form-input" id="f-id" value="${esc(sp.id)}" oninput="updateField('id', this.value)">
+        </div>
+        <div class="form-group full">
+          <label class="form-label">Base URL (上游地址)</label>
+          <input class="form-input mono" id="f-baseUrl" value="${esc(sp.baseUrl)}" oninput="updateField('baseUrl', this.value)" placeholder="https://example.com/v1">
+        </div>
+        <div class="form-group full">
+          <label class="form-label">API Key</label>
+          <div class="input-row">
+            <input class="form-input mono" id="f-apiKey" type="password" value="${esc(sp.apiKey)}" oninput="updateField('apiKey', this.value)" placeholder="sk-...">
+            <button class="btn-icon" onclick="toggleKeyVis()" id="btn-eye">👁</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">模型 / Endpoint ID</label>
+          <input class="form-input mono" id="f-model" value="${esc(sp.model)}" oninput="updateField('model', this.value)" placeholder="big-pickle">
+        </div>
+        <div class="form-group">
+          <label class="form-label">认证方式</label>
+          <select class="form-input" id="f-authType" onchange="updateField('authType', this.value)">
+            <option value="bearer" ${sp.authType === 'bearer' ? 'selected' : ''}>Bearer Token</option>
+            <option value="none" ${sp.authType === 'none' ? 'selected' : ''}>无认证 (转发客户端)</option>
+          </select>
+        </div>
+        <div class="form-group full">
+          <label class="form-check">
+            <input type="checkbox" id="f-enabled" ${sp.enabled ? 'checked' : ''} onchange="updateField('enabled', this.checked)">
+            <span>启用此供应商</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-outline" onclick="testProvider('${esc(sp.id)}')" id="btn-test">🔌 测试连接</button>
+        <button class="btn btn-primary" onclick="saveConfig()" id="btn-save">💾 保存配置</button>
+        <button class="btn btn-success" onclick="setActive('${esc(sp.id)}')" ${sp.id === activeId ? 'disabled title="已是当前"' : ''}>⚡ 设为当前使用</button>
+        <button class="btn btn-outline" onclick="writeClaudeSettings('${esc(sp.id)}')" id="btn-write">📝 写入 Claude settings.json</button>
+      </div>
+      <div class="result" id="result-test"></div>
+      <div class="result" id="result-save"></div>
+      <div class="result" id="result-write"></div>
+    </div>`;
+  }
+
+  // Provider Table
+  html += `<div class="section">
+    <div class="section-title"><span class="icon">📋</span> 供应商管理</div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>ID</th><th>名称</th><th>模型</th><th>地址</th><th>启用</th><th>状态</th><th>操作</th>
+        </tr></thead>
+        <tbody>`;
+  for (const p of providers) {
+    const isAct = p.id === activeId;
+    html += `<tr class="${isAct ? 'active-row' : ''}">
+      <td><code>${esc(p.id)}</code></td>
+      <td>${esc(p.name)}</td>
+      <td><code>${esc(p.model || '-')}</code></td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.baseUrl || '-')}</td>
+      <td>${p.enabled ? '✅' : '❌'}</td>
+      <td>${isAct ? '<span class="tag tag-active">当前</span>' : '-'}</td>
+      <td><div class="table-actions">
+        <button class="btn-sm" onclick="selectProvider('${esc(p.id)}')">编辑</button>
+        <button class="btn-sm" onclick="duplicateProvider('${esc(p.id)}')">复制</button>
+        <button class="btn-sm danger" onclick="deleteProvider('${esc(p.id)}')" ${providers.length <= 1 ? 'disabled title="至少保留一个"' : ''}>删除</button>
+      </div></td>
+    </tr>`;
+  }
+  html += `</tbody></table></div>
+    <div class="actions" style="margin-top:12px">
+      <button class="btn btn-outline" onclick="addProvider()">➕ 新增供应商</button>
+    </div>
+  </div>`;
+
+  // Footer
+  html += `<div class="footer">
+    <p>⚠️ API Key 明文存储在本地 config.json，请勿将此文件分享给他人。</p>
+    <p>Green Proxy v1 · 零依赖 Node · <a href="https://github.com" target="_blank">文档</a></p>
+  </div>`;
+
+  document.getElementById('app').innerHTML = html;
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+function selectProvider(id) {
+  selectedId = id;
+  render();
+}
+
+function updateField(field, value) {
+  const p = editedConfig.providers.find(x => x.id === selectedId);
+  if (!p) return;
+  if (field === 'id') {
+    // 如果改了 id，同步 activeProviderId 与选中态引用，避免后续按键 find 不到
+    if (editedConfig.activeProviderId === p.id) editedConfig.activeProviderId = value;
+    p.id = value;
+    selectedId = value;
+    return;
+  }
+  p[field] = value;
+}
+
+function toggleKeyVis() {
+  const input = document.getElementById('f-apiKey');
+  if (!input) return;
+  const isPass = input.type === 'password';
+  input.type = isPass ? 'text' : 'password';
+  document.getElementById('btn-eye').textContent = isPass ? '🙈' : '👁';
+}
+
+async function testProvider(id) {
+  const btn = document.getElementById('btn-test');
+  const el = document.getElementById('result-test');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 测试中...';
+  el.className = 'result info';
+  el.textContent = '正在连接...';
+
+  try {
+    const r = await api('POST', '/api/test', { providerId: id });
+    if (r.ok) {
+      el.className = 'result ok';
+      el.textContent = `✅ 连接成功\n状态: ${r.status} · 延迟: ${r.latencyMs}ms\n${r.models ? '模型列表: ' + r.models.join(', ') : '响应: ' + r.message}`;
+    } else {
+      el.className = 'result fail';
+      el.textContent = `❌ 连接失败\n状态: ${r.status} · 延迟: ${r.latencyMs}ms\n${r.message}`;
+    }
+  } catch (e) {
+    el.className = 'result fail';
+    el.textContent = '❌ 请求异常: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.innerHTML = '🔌 测试连接';
+}
+
+async function persist() {
+  // 将当前 editedConfig 提交到服务端并重新同步本地状态
+  const r = await api('PUT', '/api/config', editedConfig);
+  if (!r.ok) throw new Error(r.message || '保存失败');
+  const [st, cf] = await Promise.all([api('GET', '/api/status'), api('GET', '/api/config')]);
+  STATUS = st;
+  CONFIG = cf;
+  editedConfig = JSON.parse(JSON.stringify(CONFIG));
+  if (!editedConfig.providers.find(x => x.id === selectedId)) {
+    selectedId = editedConfig.activeProviderId || (editedConfig.providers[0] && editedConfig.providers[0].id);
+  }
+  render();
+}
+
+async function saveConfig() {
+  const btn = document.getElementById('btn-save');
+  const el = document.getElementById('result-save');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 保存中...';
+
+  try {
+    await persist();
+    el.className = 'result ok';
+    el.textContent = '✅ 配置已保存并即时生效（无需重启）';
+  } catch (e) {
+    el.className = 'result fail';
+    el.textContent = '❌ 保存失败: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.innerHTML = '💾 保存配置';
+}
+
+async function setActive(id) {
+  editedConfig.activeProviderId = id;
+  await saveConfig();
+}
+
+async function writeClaudeSettings(id) {
+  const btn = document.getElementById('btn-write');
+  const el = document.getElementById('result-write');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 写入中...';
+
+  try {
+    const r = await api('POST', '/api/write-claude-settings', { providerId: id });
+    if (r.ok) {
+      el.className = 'result ok';
+      el.textContent = `✅ Claude settings.json 已更新\n路径: ${r.path}\n备份: ${r.backupPath}\n模型: ${r.model}\n地址: ${r.baseUrl}`;
+    } else {
+      el.className = 'result fail';
+      el.textContent = '❌ 写入失败: ' + r.message;
+    }
+  } catch (e) {
+    el.className = 'result fail';
+    el.textContent = '❌ 写入异常: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.innerHTML = '📝 写入 Claude settings.json';
+}
+
+function addProvider() {
+  const id = 'provider-' + Date.now().toString(36);
+  editedConfig.providers.push({
+    id,
+    name: '新供应商',
+    enabled: true,
+    type: 'generic',
+    baseUrl: '',
+    authType: 'bearer',
+    apiKey: '',
+    model: '',
+    extraHeaders: {},
+  });
+  selectedId = id;
+  render();
+}
+
+function duplicateProvider(id) {
+  const src = editedConfig.providers.find(x => x.id === id);
+  if (!src) return;
+  const copy = JSON.parse(JSON.stringify(src));
+  copy.id = src.id + '-copy-' + Date.now().toString(36).slice(-4);
+  copy.name = src.name + ' (副本)';
+  editedConfig.providers.push(copy);
+  selectedId = copy.id;
+  render();
+}
+
+async function deleteProvider(id) {
+  if (editedConfig.providers.length <= 1) return;
+  if (!confirm('确认删除供应商 "' + (editedConfig.providers.find(x=>x.id===id)||{}).name + '"？')) return;
+  editedConfig.providers = editedConfig.providers.filter(x => x.id !== id);
+  if (editedConfig.activeProviderId === id) {
+    editedConfig.activeProviderId = editedConfig.providers[0].id;
+  }
+  if (selectedId === id) {
+    selectedId = editedConfig.providers[0].id;
+  }
+  try {
+    await persist();
+    const el = document.getElementById('result-save');
+    if (el) { el.className = 'result ok'; el.textContent = '✅ 已删除并保存'; }
+  } catch (e) {
+    alert('❌ 删除失败: ' + e.message);
+    render();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-refresh: 每 15s 刷 STATUS；若服务端配置变化（外部新增/删除）且用户未在编辑则同步
+// ---------------------------------------------------------------------------
+function isEditing() {
+  const a = document.activeElement;
+  return !!(a && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA'));
+}
+
+setInterval(async () => {
+  try {
+    const [st, cf] = await Promise.all([
+      api('GET', '/api/status'),
+      api('GET', '/api/config'),
+    ]);
+    STATUS = st;
+    if (!isEditing()) {
+      const before = JSON.stringify(CONFIG);
+      const after = JSON.stringify(cf);
+      if (before !== after) {
+        CONFIG = cf;
+        editedConfig = JSON.parse(JSON.stringify(CONFIG));
+        if (!editedConfig.providers.find(x => x.id === selectedId)) {
+          selectedId = editedConfig.activeProviderId || (editedConfig.providers[0] && editedConfig.providers[0].id);
+        }
+        render();
+      }
+    }
+  } catch {}
+}, 15000);
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+init();
+</script>
+</body>
+</html>

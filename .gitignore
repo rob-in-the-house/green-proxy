@@ -1,0 +1,18 @@
+# 敏感/运行文件 — 不入库
+config.json
+config.backup.json
+config.corrupt.*
+*.tmp
+*.log
+.claude/
+
+# 本地测试脚本（含内网端点/内部引用）
+bubble-test.py
+_mk_test.py
+
+# 评审报告（本地保留，不上传）
+评审报告_GreenProxy_架构与安全.md
+
+# 系统
+.DS_Store
+Thumbs.db
