@@ -92,6 +92,19 @@ function builtinConfig() {
   return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
 }
 
+// 配置损坏重建时，尽力从既有配置/备份恢复安全字段（authToken/host），防止鉴权被静默关闭
+function recoverSecurityFields() {
+  for (const f of [BACKUP_PATH, CONFIG_PATH]) {
+    try {
+      if (!fs.existsSync(f)) continue;
+      const c = JSON.parse(fs.readFileSync(f, 'utf8'));
+      const g = (c && c.global) || {};
+      if (g.authToken || g.host) return { authToken: String(g.authToken || ''), host: String(g.host || '') };
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
 function loadConfig() {
   try {
     if (!fs.existsSync(CONFIG_PATH)) {
@@ -117,6 +130,13 @@ function loadConfig() {
       }
     }
     const seed = builtinConfig();
+    // 损坏重建不得静默关闭鉴权或改变监听范围：恢复安全字段后再落盘
+    const rec = recoverSecurityFields();
+    if (rec) {
+      if (rec.authToken) seed.global.authToken = rec.authToken;
+      if (rec.host) seed.global.host = rec.host;
+      log('已从既有配置恢复安全字段 (authToken/host)');
+    }
     try {
       writeConfigAtomic(seed);
       log('已重新播种默认配置');
