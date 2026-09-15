@@ -474,6 +474,7 @@ function sendJson(res, status, obj) {
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(body),
+    'X-Content-Type-Options': 'nosniff',
   });
   res.end(body);
 }
@@ -949,7 +950,12 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/console' || pathname === '/console/') {
     try {
       const html = fs.readFileSync(CONSOLE_INDEX, 'utf8');
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+        'Referrer-Policy': 'no-referrer',
+      });
       res.end(html);
     } catch (e) {
       sendJson(res, 500, { type: 'error', error: { type: 'api_error', message: 'console/index.html not found: ' + e.message } });
