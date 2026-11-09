@@ -117,7 +117,9 @@ Linux / macOS：./stop.sh
 
 ### 4.1 Codex Zen (big-pickle) — 内置预设
 
-> opencode 提供的免费/低价大模型，代理内置默认使用此供应商
+> ⚠️ **2026-10 起免费档已被上游封锁，无法经代理使用。** Zen 只对官方 OpenCode 客户端开放免费模型，第三方代理请求一律 403 `FreeTierError`。此预设仅供历史留存，请改用其他供应商。
+>
+> opencode 提供的免费/低价大模型，代理内置默认使用此供应商（历史配置）
 
 | 配置项 | 值 |
 |--------|-----|
@@ -188,6 +190,23 @@ Linux / macOS：./stop.sh
 
 ---
 
+### 4.5 Anthropic 原生端点（如智谱 BigModel）
+
+> 有些网关提供的是 **Anthropic Messages 协议**（`/v1/messages`），不是 OpenAI `chat/completions`。例如智谱 BigModel 的 `https://open.bigmodel.cn/api/anthropic`。这类端点不需要协议转换，代理会**原生直通**（保留 `thinking` 块、缓存、全部 SSE 事件语义）。
+
+| 配置项 | 值 |
+|--------|-----|
+| Base URL | `https://open.bigmodel.cn/api/anthropic`（含 `/anthropic` 会被自动识别） |
+| API Key | 该服务的 API Key |
+| 模型 | 上游真实模型名，如 `glm-5.3-flash` |
+| 上游协议 | 「自动」或显式选「Anthropic 原生」 |
+
+代理会直通转发到 `{Base URL}/v1/messages`（baseUrl 已含 `/v1` 时不重复拼接），流式逐字节透传 SSE。
+
+**操作**：控制台 → 新增供应商 → 填 Base URL / Key / 模型 → 「上游协议」选 Anthropic 原生（或留自动）→ 测试连接 → 保存
+
+---
+
 ## 5. 一键写入 Claude Code 配置
 
 在控制台点击「📝 写入 Claude settings.json」后，代理自动修改 `~/.claude/settings.json`，内容如下：
@@ -244,6 +263,13 @@ Linux / macOS：./stop.sh
 1. 检查代理是否在运行：`curl http://127.0.0.1:18101/v1/models`
 2. 检查 `~/.claude/settings.json` 中 `ANTHROPIC_BASE_URL` 是否为 `http://127.0.0.1:18101`
 3. 在控制台检查当前激活供应商是否配置正确
+
+### Q：Claude Code 报 "Streaming response ended before any complete data was received"？
+
+这是上游没有返回有效 SSE 导致的，最常见原因是**供应商协议选错**（Anthropic 原生端点被当成 OpenAI 端点调用，或反之）。
+
+1. 确认该供应商的「上游协议」是否正确：OpenAI 兼容端点选 OpenAI，`/v1/messages` 端点选 Anthropic 原生（baseUrl 含 `/anthropic` 可留自动）
+2. 代理已内置兜底：上游对 stream=true 回非 SSE 时自动用 Anthropic SSE 承载完整内容
 
 ### Q：切换供应商后 Claude Code 没有变化？
 
@@ -348,7 +374,8 @@ netstat -ano | findstr 18101
       "baseUrl": "https://opencode.ai/zen/v1",
       "authType": "bearer",       // bearer 或 none
       "apiKey": "sk-xxx",
-      "model": "big-pickle",      // 发给上游的 model 字段
+      "model": "big-pickle",      // 发给上游的 model 字段；留空 = 透传客户端请求的 model（一 provider 多模型）
+      "protocol": "openai",       // openai（默认）| anthropic（原生直通）| 留空 = 按 baseUrl 自动识别
       "extraHeaders": {           // 额外请求头（JSON 对象）
         "User-Agent": "opencode/latest/1.18.18/cli",
         "x-opencode-client": "cli"
@@ -365,6 +392,15 @@ netstat -ano | findstr 18101
 |------|--------|------|
 | `PORT` | 18101 | 覆盖监听端口（优先于 config.json） |
 | `RELOAD_MODE` | `cache` | `cache`=内存缓存（推荐）；`disk`=每请求读盘（防御手工改文件） |
+| `PROXY_MAX_BODY` | 10485760 | `/v1/messages` 请求体上限字节（超出 413） |
+| `PROXY_UPSTREAM_TIMEOUT` | 120000 | 非流式上游超时毫秒 |
+| `PROXY_STREAM_IDLE_TIMEOUT` | 60000 | 流式空闲超时毫秒（无数据即中止） |
+| `PROXY_AUTH_TOKEN` | （空） | 访问令牌，优先于 config.json 的 global.authToken |
+| `PROXY_RATE_WINDOW_MS` | 300000 | 鉴权失败统计窗口（5 分钟） |
+| `PROXY_RATE_MAX_FAILS` | 5 | 窗口内最大鉴权失败次数，超过即封锁 |
+| `PROXY_RATE_BLOCK_MS` | 900000 | 触发后封锁时长（15 分钟），封锁期一律 429 |
+| `PROXY_RATE_MAX_REQ` | 0 | /v1/messages 每 IP 每分钟请求上限，0=不限 |
+| `PROXY_TRUST_PROXY` | 0 | =1 时信任 X-Forwarded-For（置于反代之后时启用） |
 
 ### 自动备份机制
 

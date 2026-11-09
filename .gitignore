@@ -17,3 +17,6 @@ _mk_test.py
 # 系统
 .DS_Store
 Thumbs.db
+
+# 本地研究资料（第三方源码克隆等，体积大且与项目无关）
+_research/

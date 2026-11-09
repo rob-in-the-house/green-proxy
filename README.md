@@ -20,6 +20,7 @@ Claude Code 只讲 **Anthropic Messages API**（`POST {base}/v1/messages` + `x-a
 | **腾讯混元** | `https://tokenhub.tencentmaas.com/v1` | 如 `hy3` | 腾讯混元 MaaS，OpenAI 兼容 |
 | **硅基流动 SiliconFlow** | `https://api.siliconflow.cn/v1` | 如 `Qwen/Qwen3.5-4B` | 硅基流动，OpenAI 兼容 |
 | **OpenRouter** | `https://openrouter.ai/api/v1` | 任意 OpenRouter 模型名 | 聚合网关，OpenAI 兼容 |
+| **Anthropic 原生** | 自填（如 `https://open.bigmodel.cn/api/anthropic`） | 自填（如 `glm-5.3-flash`） | Anthropic Messages 协议端点，原生直通 `/v1/messages`（baseUrl 含 `/anthropic` 自动识别，也可在控制台显式选「Anthropic 原生」） |
 | **通用 OpenAI 兼容 / 自建** | 用户自填 | 用户自填 | 任意 OpenAI 兼容端点 / 中转网关 / 自托管网关 |
 
 ## 快速开始
@@ -120,7 +121,8 @@ claude代理/
       "baseUrl": "https://api.deepseek.com/v1",
       "authType": "bearer",           // bearer = 用本条目 apiKey；none = 透传客户端 key
       "apiKey": "sk-xxx",
-      "model": "deepseek-v4-flash",   // ★ 权威模型名，控制台切换即改这里
+      "model": "deepseek-v4-flash",   // ★ 权威模型名，控制台切换即改这里；留空 = 用客户端请求的 model
+      "protocol": "openai",           // openai（默认）| anthropic（原生直通）| 留空 = 按 baseUrl 自动识别
       "extraHeaders": {},             // 附加请求头，如 opencode 需 User-Agent / x-opencode-client
       "notes": "备注"
     }
@@ -130,13 +132,20 @@ claude代理/
 
 ## 已知坑与内置处理（重要）
 
-### 1. opencode/zen 免费档 `MissingSessionID` 400
+### 1. opencode/zen 免费档 403 `FreeTierError`（2026-10 起已被上游封锁）
+
+> ⚠️ **2026-10 上游策略变更**：Zen 免费档从旧的「缺会话头 400 MissingSessionID」升级为**客户端来源校验**，只服务官方 OpenCode 客户端，第三方代理请求一律 `403 FreeTierError`。**此类免费档无法通过转发代理绕过**（属上游反转售策略）。请改用其他供应商（DeepSeek、火山方舟、Anthropic 原生等）。
+
+<details>
+<summary>历史备注（旧方案，现已失效）</summary>
 
 现象：走 opencode/zen 时全部 `502 upstream 400: MissingSessionID: free tier can only be used in OpenCode`。
 
-根因：**opencode/zen 免费档要求请求头 `x-opencode-session`（会话稳定 ID）**，缺失即拒绝。错误信息字面（"free tier only in OpenCode"）有误导性，实际加会话头即通。
+根因：**opencode/zen 免费档要求请求头 `x-opencode-session`（会话稳定 ID）**，缺失即拒绝。
 
-处理：代理对 baseUrl 匹配 `opencode.ai/zen` 的上游**自动注入** `x-opencode-session` 头，无需手工配置。
+处理：代理对 baseUrl 匹配 `opencode.ai/zen` 的上游**自动注入** `x-opencode-session` 头（此逻辑保留，但上游已不认）。
+
+</details>
 
 ### 2. 上游报 "tool_calls must be followed by tool messages"
 
@@ -149,8 +158,20 @@ claude代理/
 根因：客户端(Claude)请求体带 `model` 优先于 provider.model，曾导致上游收到 `big-pickle` 之类不存在的模型名。
 
 处理：代理改为 **provider.model 权威**，忽略客户端 model。控制台配置的 model 必须与上游实际支持的模型名一致。
+> 注：`model` 留空时以客户端请求体中的 `model` 为准——可用单一 provider 承载同一网关下的多个模型（如公司网关的 glm / deepseek / MiniMax 三模型切换）。
 
-### 4. 不要用 PowerShell 手改 config.json
+### 4. Claude Code 报 "Streaming response ended before any complete data was received"
+
+现象：Claude Code 卡住后报上面这句，提示检查代理/网关。
+
+根因（两种）：
+
+1. **供应商用的是 Anthropic 原生端点，但被当作 OpenAI 端点调用**（或反之）。例如 `https://open.bigmodel.cn/api/anthropic` 是 Anthropic Messages 协议，走 OpenAI 转换必然失败。
+2. 上游对 `stream=true` 回了非 SSE 响应（JSON 错误体或完整 JSON），旧逻辑无条件按 SSE 解析导致空流。
+
+处理（已内置）：代理对 Anthropic 原生端点**直通转发**；对上游非 SSE 响应自动降级为用 Anthropic SSE 完整承载内容。请在控制台正确选择「上游协议」。
+
+### 5. 不要用 PowerShell 手改 config.json
 
 PowerShell 5.1 `Set-Content -Encoding UTF8` 写**带 BOM 的 UTF-8**，Node `JSON.parse` 直接抛错 → 代理会备份后重新播种默认配置（可能覆盖你手动写的内容）。请一律通过控制台保存（走 Node 原生原子写）。
 

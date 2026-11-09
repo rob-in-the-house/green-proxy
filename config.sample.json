@@ -46,6 +46,19 @@
       "model": "",
       "extraHeaders": {},
       "notes": "任意 OpenAI 兼容端点"
+    },
+    {
+      "id": "sprixin-gateway",
+      "name": "公司模型网关 (Sprixin)",
+      "enabled": false,
+      "type": "generic",
+      "baseUrl": "http://10.60.0.3:8080/v1",
+      "authType": "bearer",
+      "apiKey": "sk-XXXX-REPLACE-ME",
+      "model": "",
+      "protocol": "openai",
+      "extraHeaders": {},
+      "notes": "内网网关示例（OpenAI 兼容）；model 留空 = 由客户端请求的 model 决定上游模型（如 glm-5.3-flash / deepseek-v4-flash / MiniMax-M3.1-Flash），注意模型名区分大小写"
     }
   ]
 }

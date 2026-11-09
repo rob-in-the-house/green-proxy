@@ -315,6 +315,15 @@ let editedConfig = null; // 用户编辑中的 config 副本
 // ---------------------------------------------------------------------------
 // API helpers
 // ---------------------------------------------------------------------------
+// 与后端 detectProtocol 保持一致：解析实际生效的上游协议
+function effProtocol(p) {
+  const explicit = String(p.protocol || '').toLowerCase();
+  if (explicit === 'anthropic' || explicit === 'openai') return explicit;
+  if (String(p.type || '').toLowerCase() === 'anthropic') return 'anthropic';
+  if (String(p.baseUrl || '').toLowerCase().includes('/anthropic')) return 'anthropic';
+  return 'openai';
+}
+
 const AUTH_TOKEN_KEY = 'green_proxy_auth_token';
 
 async function api(method, path, body) {
@@ -411,6 +420,7 @@ function render() {
       <div class="meta">${esc(p.model || '未配置模型')}</div>
       <div class="meta">${esc(p.baseUrl ? p.baseUrl.substring(0, 35) + (p.baseUrl.length > 35 ? '...' : '') : '未配置地址')}</div>
       <span class="tag tag-${p.type === 'predefined' ? 'preset' : 'generic'}">${p.type === 'predefined' ? '预设' : '通用'}</span>
+      <span class="tag tag-generic">${effProtocol(p) === 'anthropic' ? 'Anthropic' : 'OpenAI'}</span>
       ${isActive ? ' <span class="tag tag-active">当前使用</span>' : ''}
     </div>`;
   }
@@ -444,6 +454,14 @@ function render() {
         <div class="form-group">
           <label class="form-label">模型 / Endpoint ID</label>
           <input class="form-input mono" id="f-model" value="${esc(sp.model)}" oninput="updateField('model', this.value)" placeholder="big-pickle">
+        </div>
+        <div class="form-group">
+          <label class="form-label">上游协议</label>
+          <select class="form-input" id="f-protocol" onchange="updateField('protocol', this.value)">
+            <option value="" ${!sp.protocol ? 'selected' : ''}>自动（按地址识别）</option>
+            <option value="openai" ${sp.protocol === 'openai' ? 'selected' : ''}>OpenAI 兼容</option>
+            <option value="anthropic" ${sp.protocol === 'anthropic' ? 'selected' : ''}>Anthropic 原生</option>
+          </select>
         </div>
         <div class="form-group">
           <label class="form-label">认证方式</label>
@@ -646,6 +664,7 @@ function addProvider() {
     authType: 'bearer',
     apiKey: '',
     model: '',
+    protocol: '',
     extraHeaders: {},
   });
   selectedId = id;

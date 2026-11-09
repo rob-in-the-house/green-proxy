@@ -181,6 +181,17 @@ function currentConfig() {
   return inMemory.config;
 }
 
+// 判定上游协议：openai（默认）/ anthropic（原生直通）
+// 优先级：显式 protocol > type==='anthropic' > baseUrl 含 /anthropic > openai
+function detectProtocol(p) {
+  const explicit = String(p.protocol || '').toLowerCase();
+  if (explicit === 'anthropic' || explicit === 'openai') return explicit;
+  if (String(p.type || '').toLowerCase() === 'anthropic') return 'anthropic';
+  const url = String(p.baseUrl || '').toLowerCase();
+  if (url.includes('/anthropic')) return 'anthropic';
+  return 'openai';
+}
+
 // 规范化 provider：去 baseUrl 尾部 '/'，补默认字段
 function normalizeProvider(p) {
   if (!p) return null;
@@ -195,6 +206,7 @@ function normalizeProvider(p) {
     model: p.model || '',
     extraHeaders: (p.extraHeaders && typeof p.extraHeaders === 'object') ? p.extraHeaders : {},
     keepAnthropicAuth: !!p.keepAnthropicAuth,
+    protocol: detectProtocol(p),
   };
 }
 
@@ -333,6 +345,14 @@ function upstreamHeaders(provider, clientAuth) {
   // opencode/zen 免费档强制要求会话头
   if (/opencode\.ai\/zen/i.test(String(provider.baseUrl)) && !(provider.extraHeaders && provider.extraHeaders['x-opencode-session'])) {
     headers['x-opencode-session'] = opencodeSession();
+  }
+  // Anthropic 原生上游：补 anthropic-version 与 x-api-key（兼容只用 x-api-key 的网关）
+  if (provider.protocol === 'anthropic') {
+    headers['anthropic-version'] = '2023-06-01';
+    const key = provider.authType === 'bearer' && provider.apiKey
+      ? provider.apiKey
+      : String(clientAuth || '').replace(/^Bearer\s+/i, '');
+    if (key) headers['x-api-key'] = key;
   }
   // extraHeaders 覆盖默认（对象展开顺序在后）
   return { ...headers, ...provider.extraHeaders };
@@ -506,6 +526,70 @@ async function upstreamChat(body, provider, clientAuth) {
   return { status: res.status, text };
 }
 
+// 构建 Anthropic 上游 /v1/messages 地址（baseUrl 已含 /v1 时不重复）
+function anthropicMessagesUrl(baseUrl) {
+  const b = String(baseUrl || '').replace(/\/+$/, '');
+  if (/\/v1$/i.test(b)) return `${b}/messages`;
+  return `${b}/v1/messages`;
+}
+
+// Anthropic 原生直通：请求体原样转发（model 以 provider 为权威）。
+// 覆盖 BigModel(/api/anthropic)、Anthropic 官方、以及其他 Anthropic 兼容网关。
+// 流式逐字节透传上游 SSE（保留 thinking / ping / cache 等全部事件语义）。
+async function handleAnthropicPassthrough(req, res, anthropic, provider, clientAuth, model) {
+  const url = anthropicMessagesUrl(provider.baseUrl);
+  const payload = { ...anthropic, model };
+  const stream = !!anthropic.stream;
+  try {
+    const upstreamRes = await fetch(url, {
+      method: 'POST',
+      headers: upstreamHeaders(provider, clientAuth),
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+    if (!upstreamRes.ok) {
+      const t = await upstreamRes.text();
+      log(`anthropic upstream ${upstreamRes.status}`);
+      sendJson(res, 502, {
+        type: 'error',
+        error: { type: 'api_error', message: `upstream ${upstreamRes.status}: ${sanitizeUpstreamSnippet(t)}` },
+      });
+      return;
+    }
+    if (!stream) {
+      const text = await upstreamRes.text();
+      res.writeHead(200, { 'Content-Type': 'application/json', 'X-Content-Type-Options': 'nosniff' });
+      res.end(text);
+      log('anthropic passthrough (non-stream) done');
+      return;
+    }
+    // 流式：逐字节透传上游 Anthropic SSE
+    res.writeHead(200, {
+      'Content-Type': upstreamRes.headers.get('content-type') || 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+    const reader = upstreamRes.body.getReader();
+    const onClose = () => { try { reader.cancel(); } catch { /* ignore */ } };
+    req.on('close', onClose);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) res.write(Buffer.from(value));
+      }
+    } finally {
+      req.off('close', onClose);
+    }
+    res.end();
+    log('anthropic passthrough (stream) done');
+  } catch (e) {
+    log('anthropic upstream error:', e.message);
+    if (!res.headersSent) sendJson(res, 502, { type: 'error', error: { type: 'api_error', message: e.message } });
+    else res.end();
+  }
+}
+
 async function handleMessages(req, res, rawBody, apiKey) {
   let anthropic;
   try {
@@ -560,6 +644,12 @@ async function handleMessages(req, res, rawBody, apiKey) {
   if (anthropic.top_p !== undefined) openaiBody.top_p = anthropic.top_p;
 
   const headers = upstreamHeaders(provider, apiKey);
+
+  // Anthropic 原生上游：直接直通 /v1/messages（保留 thinking 块、工具、缓存等全部语义）
+  if (provider.protocol === 'anthropic') {
+    await handleAnthropicPassthrough(req, res, anthropic, provider, apiKey, model);
+    return;
+  }
 
   // Non-streaming
   if (!stream) {
@@ -833,6 +923,41 @@ async function handleApi(req, res, pathname) {
 
 async function testProvider(provider) {
   const t0 = Date.now();
+
+  // Anthropic 原生上游：直接用 /v1/messages 探测
+  if (provider.protocol === 'anthropic') {
+    const body = {
+      model: provider.model || 'claude-3-5-sonnet-latest',
+      max_tokens: 8,
+      stream: false,
+      messages: [{ role: 'user', content: 'ping' }],
+    };
+    try {
+      const r = await fetch(anthropicMessagesUrl(provider.baseUrl), {
+        method: 'POST',
+        headers: upstreamHeaders(provider, ''),
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15000),
+      });
+      const text = await r.text();
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch { /* ignore */ }
+      const ok = r.ok && !parsed?.error;
+      const content = parsed?.content?.find?.((b) => b.type === 'text')?.text
+        || parsed?.content?.[0]?.text
+        || parsed?.content?.[0]?.thinking
+        || '';
+      return {
+        ok,
+        status: r.status,
+        latencyMs: Date.now() - t0,
+        message: ok ? (String(content).slice(0, 80) || 'ok') : (parsed?.error?.message || parsed?.msg || sanitizeUpstreamSnippet(text)),
+      };
+    } catch (e) {
+      return { ok: false, status: 0, latencyMs: Date.now() - t0, message: e.message };
+    }
+  }
+
   // 1. Try GET {baseUrl}/models
   try {
     const r = await fetch(`${provider.baseUrl}/models`, {
