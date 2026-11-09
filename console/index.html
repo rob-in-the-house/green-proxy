@@ -315,18 +315,13 @@ let editedConfig = null; // 用户编辑中的 config 副本
 // ---------------------------------------------------------------------------
 // API helpers
 // ---------------------------------------------------------------------------
-const AUTH_TOKEN_KEY = 'green_proxy_auth_token';
-
 async function api(method, path, body) {
   const opts = { method, headers: {} };
-  const tok = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (tok) opts.headers['Authorization'] = 'Bearer ' + tok;
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
   const r = await fetch(path, opts);
-  if (r.status === 401) throw new Error('登录鉴权失败：请在下方输入 global.authToken');
   return r.json();
 }
 
@@ -342,22 +337,10 @@ async function init() {
     selectedId = CONFIG.activeProviderId || (CONFIG.providers[0] && CONFIG.providers[0].id);
     editedConfig = JSON.parse(JSON.stringify(CONFIG));
   } catch (e) {
-    document.getElementById('app').innerHTML =
-      '<div class="section"><h2>需要登录</h2>' +
-      '<p>代理已开启公网登录鉴权，请填写访问令牌（config.json 的 global.authToken）：</p>' +
-      '<div class="input-row"><input class="form-input mono" id="login-token" type="password" placeholder="输入 authToken"></div>' +
-      '<div class="actions"><button class="btn btn-primary" onclick="saveAuthToken()">🔑 登录</button></div>' +
-      '<div class="result fail" id="login-result"></div></div>';
+    document.getElementById('app').innerHTML = '<div class="section"><h2>连接失败</h2><p>无法连接代理: ' + esc(e.message) + '</p><p>请确认代理正在运行。</p></div>';
     return;
   }
   render();
-}
-
-function saveAuthToken() {
-  const inp = document.getElementById('login-token');
-  const el = document.getElementById('login-result');
-  localStorage.setItem(AUTH_TOKEN_KEY, (inp.value || '').trim());
-  init();
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +358,15 @@ function fmtUptime(ms) {
   const m = Math.floor(s / 60);
   if (m < 60) return m + 'm ' + (s % 60) + 's';
   return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+
+// 与后端 detectProtocol 保持一致：解析实际生效的上游协议
+function effProtocol(p) {
+  const explicit = String(p.protocol || '').toLowerCase();
+  if (explicit === 'anthropic' || explicit === 'openai') return explicit;
+  if (String(p.type || '').toLowerCase() === 'anthropic') return 'anthropic';
+  if (String(p.baseUrl || '').toLowerCase().includes('/anthropic')) return 'anthropic';
+  return 'openai';
 }
 
 function render() {
@@ -411,6 +403,7 @@ function render() {
       <div class="meta">${esc(p.model || '未配置模型')}</div>
       <div class="meta">${esc(p.baseUrl ? p.baseUrl.substring(0, 35) + (p.baseUrl.length > 35 ? '...' : '') : '未配置地址')}</div>
       <span class="tag tag-${p.type === 'predefined' ? 'preset' : 'generic'}">${p.type === 'predefined' ? '预设' : '通用'}</span>
+      <span class="tag tag-generic">${effProtocol(p) === 'anthropic' ? 'Anthropic' : 'OpenAI'}</span>
       ${isActive ? ' <span class="tag tag-active">当前使用</span>' : ''}
     </div>`;
   }
@@ -437,7 +430,7 @@ function render() {
         <div class="form-group full">
           <label class="form-label">API Key</label>
           <div class="input-row">
-            <input class="form-input mono" id="f-apiKey" type="password" value="${sp.apiKeyRedacted ? '' : esc(sp.apiKey)}" oninput="updateField('apiKey', this.value)" placeholder="${sp.apiKeyRedacted ? '（已保存 ****，留空则不修改）' : 'sk-...'}">
+            <input class="form-input mono" id="f-apiKey" type="password" value="${esc(sp.apiKey)}" oninput="updateField('apiKey', this.value)" placeholder="sk-...">
             <button class="btn-icon" onclick="toggleKeyVis()" id="btn-eye">👁</button>
           </div>
         </div>
@@ -450,6 +443,14 @@ function render() {
           <select class="form-input" id="f-authType" onchange="updateField('authType', this.value)">
             <option value="bearer" ${sp.authType === 'bearer' ? 'selected' : ''}>Bearer Token</option>
             <option value="none" ${sp.authType === 'none' ? 'selected' : ''}>无认证 (转发客户端)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">上游协议</label>
+          <select class="form-input" id="f-protocol" onchange="updateField('protocol', this.value)">
+            <option value="" ${!sp.protocol ? 'selected' : ''}>自动（按地址识别）</option>
+            <option value="openai" ${sp.protocol === 'openai' ? 'selected' : ''}>OpenAI 兼容</option>
+            <option value="anthropic" ${sp.protocol === 'anthropic' ? 'selected' : ''}>Anthropic 原生</option>
           </select>
         </div>
         <div class="form-group full">
@@ -531,9 +532,6 @@ function updateField(field, value) {
     return;
   }
   p[field] = value;
-  if (field === 'apiKey' && value) {
-    p.apiKeyRedacted = false;
-  }
 }
 
 function toggleKeyVis() {
@@ -570,12 +568,6 @@ async function testProvider(id) {
 }
 
 async function persist() {
-  // 剔除未改动的脱敏 apiKey（apiKeyRedacted 且值含 '****'）→ 让后端沿用旧 key，避免脱敏占位写盘破坏凭证
-  for (const p of editedConfig.providers) {
-    if (p && p.apiKeyRedacted && typeof p.apiKey === 'string' && p.apiKey.includes('****')) {
-      delete p.apiKey;
-    }
-  }
   // 将当前 editedConfig 提交到服务端并重新同步本地状态
   const r = await api('PUT', '/api/config', editedConfig);
   if (!r.ok) throw new Error(r.message || '保存失败');
@@ -647,6 +639,7 @@ function addProvider() {
     apiKey: '',
     model: '',
     extraHeaders: {},
+    protocol: '',
   });
   selectedId = id;
   render();

@@ -13,22 +13,19 @@ Claude Code 只讲 **Anthropic Messages API**（`POST {base}/v1/messages` + `x-a
 
 | 供应商 | Base URL | 模型/Endpoint | 说明 |
 |--------|----------|---------------|------|
-| **Codex Zen (big-pickle)** | `https://opencode.ai/zen/v1` | `big-pickle` | opencode 内置免费模型；**必须带 `x-opencode-session` 头**（代理已自动注入） |
+| **Codex Zen (big-pickle)** | `https://opencode.ai/zen/v1` | `big-pickle` | ⚠️ **免费档已被上游封锁**：Zen 现在只对官方 OpenCode 客户端开放免费模型，第三方代理会收到 403 `FreeTierError`（详见「已知坑 #1」）。该 Key 仍可用于付费模型 |
 | **DeepSeek 官方** | `https://api.deepseek.com/v1` | `deepseek-v4-flash` / `deepseek-v4-pro` / `deepseek-chat` / `deepseek-reasoner` | 官方 API，OpenAI 兼容 |
-| **火山方舟 ARK** | `https://ark.cn-beijing.volces.com/api/v3`（标准）<br>`https://ark.cn-beijing.volces.com/api/coding/v3`（Coding） | Endpoint ID (ep-xxxx) 或 `deepseek-v4-flash` / `deepseek-v4-pro` | 火山引擎网关：标准 v3 与 Coding 计划双端点，同一供应商 |
-| **Agnes** | `https://apihub.agnes-ai.com/v1` | 如 `agnes-3.0-flash` | Agnes APIhub，OpenAI 兼容 |
-| **腾讯混元** | `https://tokenhub.tencentmaas.com/v1` | 如 `hy3` | 腾讯混元 MaaS，OpenAI 兼容 |
-| **硅基流动 SiliconFlow** | `https://api.siliconflow.cn/v1` | 如 `Qwen/Qwen3.5-4B` | 硅基流动，OpenAI 兼容 |
-| **OpenRouter** | `https://openrouter.ai/api/v1` | 任意 OpenRouter 模型名 | 聚合网关，OpenAI 兼容 |
-| **通用 OpenAI 兼容 / 自建** | 用户自填 | 用户自填 | 任意 OpenAI 兼容端点 / 中转网关 / 自托管网关 |
+| **火山方舟 ARK** | `https://ark.cn-beijing.volces.com/api/v3` | 填 Endpoint ID (ep-xxxx) | 商业多模型 |
+| **火山 Coding (v4 系列)** | `https://ark.cn-beijing.volces.com/api/coding/v3` | `deepseek-v4-flash` / `deepseek-v4-pro` | 火山 Coding 计划网关 |
+| **Anthropic 原生** | 自填（如 `https://open.bigmodel.cn/api/anthropic`） | 自填（如 `glm-5.3-flash`） | Anthropic Messages 协议直通，保留 thinking 块。baseUrl 含 `/anthropic` 时自动识别 |
+| **通用 OpenAI 兼容** | 用户自填 | 用户自填 | 任意 OpenAI 兼容端点 / 中转网关 |
 
 ## 快速开始
 
 ### 启动
 
 ```
-Windows：双击 start.cmd
-Linux / macOS：./start.sh
+双击 start.cmd   （或 PowerShell 执行 .\start-proxy.ps1）
 ```
 
 - 后台静默启动 Node 代理，自动打开浏览器控制台 `http://127.0.0.1:18101/console`
@@ -37,8 +34,7 @@ Linux / macOS：./start.sh
 ### 停止
 
 ```
-Windows：双击 stop.cmd
-Linux / macOS：./stop.sh
+双击 stop.cmd    （或 PowerShell 执行 .\stop-proxy.ps1）
 ```
 
 ### 无需安装
@@ -51,15 +47,20 @@ Linux / macOS：./stop.sh
 ```
 claude代理/
 ├── proxy.mjs             # 多供应商桥接代理（核心，唯一入口）
-├── config.json           # 运行时配置（端口 + 供应商列表，控制台写入；含真实 Key 不入库）
-├── config.sample.json    # 脱敏配置模板（复制为 config.json 后填入真实 Key）
+├── config.json           # 运行时配置（端口 + 供应商列表，控制台写入）
 ├── console/index.html    # Web 控制台界面（代理实时读盘伺服，改完刷新即生效）
-├── start.cmd             # Windows 双击启动（后台 + 打开浏览器）
-├── stop.cmd              # Windows 双击停止
-├── start.sh              # Linux / macOS 启动脚本（nohup 后台，日志 logs/proxy.log）
-├── stop.sh               # Linux / macOS 停止脚本
+├── start.cmd             # 双击启动（后台 + 打开浏览器）
+├── stop.cmd              # 双击停止
+├── start-proxy.ps1       # PowerShell 启动脚本
+├── stop-proxy.ps1        # PowerShell 停止脚本
+├── bubble-test.py        # Claude 风格请求冒泡排序测试脚本（走本地代理）
 ├── README.md             # 本文件
-└── USAGE.md              # 控制台详细操作手册
+├── USAGE.md              # 控制台详细操作手册
+└── legacy/               # 原始单供应商版 claude-zen-proxy.mjs 归档
+    ├── claude-zen-proxy.mjs
+    ├── start-proxy.ps1 / stop-proxy.ps1   # legacy 启停（默认独立端口 18102）
+    ├── env-backup.json
+    └── proxy.log
 ```
 
 ## 使用步骤
@@ -106,8 +107,7 @@ claude代理/
   "version": 1,
   "global": {
     "port": 18101,          // 监听端口
-    "host": "127.0.0.1",    // 监听地址；开放公网请改为 0.0.0.0 + 设 authToken
-    "authToken": "",         // ★ 公网访问令牌（登录鉴权）：设置后所有端点(console/api/v1)都需 Authorization: Bearer <authToken>；空 = 不鉴权（仅内网）
+    "host": "127.0.0.1",    // 仅本地访问
     "autoOpenBrowser": true
   },
   "activeProviderId": "deepseek-official",   // 当前活跃供应商 id
@@ -121,6 +121,7 @@ claude代理/
       "authType": "bearer",           // bearer = 用本条目 apiKey；none = 透传客户端 key
       "apiKey": "sk-xxx",
       "model": "deepseek-v4-flash",   // ★ 权威模型名，控制台切换即改这里
+      "protocol": "openai",           // openai（默认）| anthropic（原生直通）| 留空=按 baseUrl 自动识别
       "extraHeaders": {},             // 附加请求头，如 opencode 需 User-Agent / x-opencode-client
       "notes": "备注"
     }
@@ -130,13 +131,23 @@ claude代理/
 
 ## 已知坑与内置处理（重要）
 
-### 1. opencode/zen 免费档 `MissingSessionID` 400
+### 1. opencode/zen 免费档 403 `FreeTierError`（big-pickle 等免费模型，当前无法绕过）
 
-现象：走 opencode/zen 时全部 `502 upstream 400: MissingSessionID: free tier can only be used in OpenCode`。
+现象：走 opencode/zen 的免费模型（`big-pickle`、`*-free`）时，上游返回
 
-根因：**opencode/zen 免费档要求请求头 `x-opencode-session`（会话稳定 ID）**，缺失即拒绝。错误信息字面（"free tier only in OpenCode"）有误导性，实际加会话头即通。
+```
+403 {"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}}
+```
 
-处理：代理对 baseUrl 匹配 `opencode.ai/zen` 的上游**自动注入** `x-opencode-session` 头，无需手工配置。
+根因（2026-10 上游策略变更）：Zen 免费档从过去的"缺会话头即 400 MissingSessionID"升级为**客户端来源校验**，只服务官方 OpenCode 客户端。实测结论：
+
+- **不是 Key / 账号被封**：同一个 API Key 请求付费模型会通过鉴权并返回 `402 Insufficient account funds`（Key 有效，仅账号无余额），免费模型则一律 403。
+- **官方客户端仍可用**：`opencode-cli.exe run -m opencode/big-pickle --standalone` 当前返回正常（PONG）。
+- **请求头伪造无效**：代理即使注入完整官方请求头——`x-opencode-session-id`（`ses_`+64 位 hex）、`x-session-affinity`、`X-Session-Id`、`x-opencode-session`、`x-opencode-project`、`x-opencode-client`、`User-Agent: opencode/latest/2.0.26/cli`——并改走 HTTP/2，仍然 403。说明差异在**传输层客户端指纹 / 来源校验**，不是应用层请求头。
+
+处理：**此类免费档无法通过转售代理绕过**（属上游反转售策略）。请改用其他供应商（DeepSeek、火山方舟、Anthropic 原生等），或为 Zen 账号充值后使用付费模型。
+
+> 历史备注：早期版本注入 `x-opencode-session` 头即可放行，该做法现已失效。
 
 ### 2. 上游报 "tool_calls must be followed by tool messages"
 
@@ -154,6 +165,22 @@ claude代理/
 
 PowerShell 5.1 `Set-Content -Encoding UTF8` 写**带 BOM 的 UTF-8**，Node `JSON.parse` 直接抛错 → 代理会备份后重新播种默认配置（可能覆盖你手动写的内容）。请一律通过控制台保存（走 Node 原生原子写）。
 
+### 5. Claude Code 报 "Streaming response ended before any complete data was received"
+
+现象：Claude Code 卡住后报上面这句，提示检查代理/网关。
+
+根因（两种）：
+
+1. **供应商用了 Anthropic 原生端点，但被当成 OpenAI 端点调用**。例如 `https://open.bigmodel.cn/api/anthropic` 是 Anthropic Messages 协议，代理却拼成 `/chat/completions`，上游返回 HTTP 200 + `{"code":500,"msg":"404 NOT_FOUND"}`（非 SSE）。旧版代理无条件按 SSE 解析 → 只发出 `message_start`/`message_stop`，没有任何内容块 → Claude 判定"没收到完整数据"。
+2. **上游对 `stream:true` 却返回非 SSE 的 JSON**（错误体或完整回复）。
+
+处理（已内置）：
+
+- 代理会**自动识别** baseUrl 含 `/anthropic` 的供应商为 **Anthropic 原生协议**，走 `/v1/messages` 直通转发（逐字节透传 SSE，保留 `thinking`/`ping` 等事件）；也可在控制台「上游协议」下拉显式选择。
+- OpenAI 路径新增加固：上游返回非 SSE 时，若是错误体则回 502 并带上游原文；若是完整 JSON 回复则自动转成合规 Anthropic SSE，不再产生空流。
+- 控制台「🔌 测试连接」会按协议选择 `/chat/completions` 或 `/v1/messages` 探测。
+
+
 ## 环境变量
 
 | 变量 | 说明 |
@@ -162,31 +189,6 @@ PowerShell 5.1 `Set-Content -Encoding UTF8` 写**带 BOM 的 UTF-8**，Node `JSO
 | `RELOAD_MODE` | `cache`（默认，控制台保存即生效）/ `disk`（每请求读盘，防御手改文件） |
 | `PROXY_BASE` | bubble-test.py 用的代理地址（默认 `http://127.0.0.1:18101`） |
 | `MODEL` | bubble-test.py 覆盖 model（默认 `deepseek-v4-flash`） |
-| `PROXY_AUTH_TOKEN` | 环境变量形式的访问令牌，优先于 config.json 的 `global.authToken` |
-| `PROXY_RATE_WINDOW_MS` | 鉴权失败统计窗口毫秒（默认 300000 = 5 分钟） |
-| `PROXY_RATE_MAX_FAILS` | 窗口内最大鉴权失败次数，超过即封锁（默认 5） |
-| `PROXY_RATE_BLOCK_MS` | 触发后封锁时长毫秒（默认 900000 = 15 分钟），封锁期一律 429 |
-| `PROXY_RATE_MAX_REQ` | `/v1/messages` 每 IP 每分钟请求上限（默认 0 = 不限） |
-| `PROXY_TRUST_PROXY` | `1` = 信任 `X-Forwarded-For` 取真实客户端 IP（置于反代之后时启用） |
-| `PROXY_MAX_BODY` | `/v1/messages` 请求体上限字节（默认 10485760 = 10MB，超限 413） |
-| `PROXY_UPSTREAM_TIMEOUT` | 非流式上游总超时毫秒（默认 120000） |
-| `PROXY_STREAM_IDLE_TIMEOUT` | 流式空闲超时毫秒，超时无数据断开（默认 60000） |
-
-## 公网部署鉴权（登录鉴权）
-
-代理默认 `host: 127.0.0.1` 仅内网访问。若**开放到公网**，请：
-
-1. 把 `global.host` 改为 `0.0.0.0`（监听所有网卡）。
-2. 设置 `global.authToken` 为共享访问令牌（如 `sk-xxxx`）。
-3. 开放端口（防火墙 / 安全组放行）。
-
-**鉴权规则**：
-- `global.authToken` **空** → 不鉴权（仅内网直连，行为与旧版一致）。
-- `global.authToken` **非空** → **所有端点**（`/console`、`/api/*`、`/v1/*`）都需携带 `Authorization: Bearer <authToken>` 或 `x-api-key: <authToken>`，否则 `401`。
-- Claude CLI 通过代理时把 `ANTHROPIC_AUTH_TOKEN` 设为该 authToken 即可。
-- 控制台打开后若 401 → 页面显示登录框，输入 authToken 即可。
-
-> 该令牌是「共享访问令牌」（公网访问代理的登录凭证），与各供应商的 `apiKey` 无关；代理转发上游时用**供应商自身的 apiKey**，二者互不影响。
 
 ## 已验证功能
 
@@ -194,8 +196,10 @@ PowerShell 5.1 `Set-Content -Encoding UTF8` 写**带 BOM 的 UTF-8**，Node `JSO
 |------|------|
 | 非流式对话 | ✅ Anthropic → OpenAI → Anthropic |
 | 流式对话 | ✅ SSE 分块 + message_stop |
+| Anthropic 原生上游 | ✅ baseUrl 含 `/anthropic` 自动直通 `/v1/messages`（保留 thinking 块） |
+| 上游返回非 SSE | ✅ 错误体回 502；完整 JSON 自动转 Anthropic SSE，不再空流 |
 | 工具调用（单轮/多轮历史） | ✅ tool_use / tool_result 双向转换，含修复后的空 user 问题 |
-| opencode/zen 会话头 | ✅ 自动注入 `x-opencode-session` |
+| ~~opencode/zen 会话头~~ | ⚠️ 已失效：上游改为客户端来源校验，免费档无法经代理使用（见已知坑 #1） |
 | provider.model 权威 | ✅ 客户端传任意 model 均被覆盖为上游真实模型 |
 | 系统提示词 | ✅ 自动拆成 OpenAI system 消息 |
 | 控制台离线渲染 | ✅ 无 CDN，断网可用 |
@@ -212,58 +216,20 @@ PowerShell 5.1 `Set-Content -Encoding UTF8` 写**带 BOM 的 UTF-8**，Node `JSO
 6. **后台进程莫名消失 / `ChildProcess.kill`** → opencode 等 shell 包装层会连带杀掉 Start-Process 的后台子进程；改用 `start.cmd` 双击启动，或确认 `node proxy.mjs` 进程存活
 7. **ARK 模型填什么** → 火山方舟控制台创建 Endpoint，模型 ID 格式 `ep-20240101xxxxx`；v4 系列走 Coding 网关用模型名即可
 
+## legacy 归档目录
+
+`legacy/` 保留原始单供应商版（仅转发到 `opencode.ai/zen/v1`）。如需临时回退：
+
+```
+legacy\start-proxy.ps1   # 默认独立端口 18102，避免与主代理 18101 冲突
+legacy\stop-proxy.ps1
+```
+
+legacy 的 start 脚本会自动从父目录 `config.json` 读取 opencode API Key 作为 `FIXED_KEY`（读不到则需手动设 `$env:FIXED_KEY`）。
+
 ## 安全注意
 
 - API Key 明文存储在本地 `config.json`，请勿分享该文件
 - 代理仅监听 `127.0.0.1`，外部无法访问
 - 切换供应商前建议先在控制台「测试连接」验证
 - 不用 PowerShell 手改 config.json（见上文坑 #4）
-
-## 安全加固（公网部署）
-
-### 内置安全机制
-
-- **非回环监听强制鉴权**：`global.host` 设为非回环地址（如 `0.0.0.0`）且未配置 `global.authToken`（或环境变量 `PROXY_AUTH_TOKEN`）时，代理**拒绝启动**并给出明确提示（fail-closed）。
-- **配置读取脱敏**：`GET /api/config` 返回的 `apiKey` 一律打码为 `前4位+****+后4位`；控制台保存时未改动的 key 自动沿用旧值，不会被脱敏占位覆盖。
-- **settings.json 写入限制**：`POST /api/write-claude-settings` 仅在回环监听（`127.0.0.1` / `localhost` / `::1`）下可用，非回环监听一律返回 404。
-
-### 公网部署建议
-
-1. **必须**设置高强度 `global.authToken`（建议 ≥20 位随机串）。
-2. **必须**前置 HTTPS 反向代理（Nginx / Caddy）做 TLS 终止，不要裸 HTTP 对公网。
-3. 建议在反代层叠加 IP 白名单 / mTLS / 限流。
-4. 用低权限账号运行代理进程；`config.json` 仅对运行账号可读。
-5. 个人/小团队更优解：SSH 隧道 / Tailscale 内网穿透，而非直接开放公网端口。
-
-### 反向代理示例（TLS 终止）
-
-Caddy（自动 HTTPS，最简）：
-
-```Caddyfile
-gpt.example.com {
-    reverse_proxy 127.0.0.1:18101 {
-        flush_interval -1    # SSE 流式必需：关闭响应缓冲
-    }
-}
-```
-
-Nginx：
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name gpt.example.com;
-    # ssl_certificate / ssl_certificate_key 按需配置
-
-    location / {
-        proxy_pass http://127.0.0.1:18101;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header X-Forwarded-For $remote_addr;   # 配合 PROXY_TRUST_PROXY=1
-        proxy_buffering off;                             # SSE 流式必需：关闭缓冲
-        proxy_read_timeout 300s;
-    }
-}
-```
-
-> 反代之后请设置环境变量 `PROXY_TRUST_PROXY=1`，限流/防爆破将按 `X-Forwarded-For` 的真实客户端 IP 统计（仅当反代正确设置该头时启用，否则保持默认以免伪造绕过）。

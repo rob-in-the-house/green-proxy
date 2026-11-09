@@ -26,7 +26,7 @@
 | **Node.js** | v18 或更高 | 运行代理核心（下载：https://nodejs.org/） |
 | **浏览器** | Chrome / Edge / Firefox | 打开控制台界面（自动调用） |
 | **Claude Code** | 任意版本 | Claude Code CLI 客户端 |
-| **操作系统** | Windows / macOS / Linux | Windows 用 cmd 脚本；Linux/macOS 用 bash 脚本（start.sh / stop.sh） |
+| **操作系统** | Windows / macOS / Linux | 主要测试 Windows，其他系统理论可用 |
 
 **无需安装：** 不需要 npm install，不需要额外依赖包。绿色文件夹，拷贝即用。
 
@@ -37,8 +37,7 @@
 ### 第一步：双击启动
 
 ```
-Windows：双击 start.cmd
-Linux / macOS：终端执行 ./start.sh
+双击 start.cmd（Windows）
 ```
 
 启动后会自动：
@@ -70,8 +69,7 @@ claude   # 正常使用，自动走代理
 ### 停止代理
 
 ```
-Windows：双击 stop.cmd
-Linux / macOS：./stop.sh
+双击 stop.cmd
 ```
 
 ---
@@ -117,7 +115,9 @@ Linux / macOS：./stop.sh
 
 ### 4.1 Codex Zen (big-pickle) — 内置预设
 
-> opencode 提供的免费/低价大模型，代理内置默认使用此供应商
+> ⚠️ **2026-10 起免费档已被上游封锁，无法经代理使用。** Zen 只对官方 OpenCode 客户端开放免费模型，第三方代理请求一律返回 `403 FreeTierError: OpenCode's free tier can only be used from within OpenCode`（伪造官方会话头 / User-Agent / HTTP2 均无效，详见 README「已知坑 #1」）。该 Key 仍可用于付费模型。**建议改用 4.2~4.6 的其他供应商。**
+>
+> opencode 提供的免费/低价大模型，代理内置默认使用此供应商（历史配置，仅供留存）
 
 | 配置项 | 值 |
 |--------|-----|
@@ -188,6 +188,23 @@ Linux / macOS：./stop.sh
 
 ---
 
+### 4.5 Anthropic 原生端点（如智谱 BigModel）
+
+> 有些网关提供的是 **Anthropic Messages 协议**（`/v1/messages`），不是 OpenAI `chat/completions`。例如智谱 BigModel：`https://open.bigmodel.cn/api/anthropic`。
+
+| 配置项 | 值 |
+|--------|-----|
+| Base URL | `https://open.bigmodel.cn/api/anthropic`（含 `/anthropic` 会被自动识别） |
+| API Key | 你的智谱 API Key（形如 `id.secret`） |
+| 模型 | 上游真实模型名，如 `glm-5.3-flash` |
+| 上游协议 | 「自动」或显式选「Anthropic 原生」 |
+
+代理会直通转发到 `{Base URL}/v1/messages`，逐字节透传 SSE（保留 `thinking` 块、`ping` 等事件）。
+
+**操作：** 控制台 → 新增供应商 → 填 Base URL / Key / 模型 → 「上游协议」选 Anthropic 原生（或留自动）→ 测试连接 → 保存 → 设为当前。
+
+---
+
 ## 5. 一键写入 Claude Code 配置
 
 在控制台点击「📝 写入 Claude settings.json」后，代理自动修改 `~/.claude/settings.json`，内容如下：
@@ -244,6 +261,14 @@ Linux / macOS：./stop.sh
 1. 检查代理是否在运行：`curl http://127.0.0.1:18101/v1/models`
 2. 检查 `~/.claude/settings.json` 中 `ANTHROPIC_BASE_URL` 是否为 `http://127.0.0.1:18101`
 3. 在控制台检查当前激活供应商是否配置正确
+
+### Q：Claude Code 报 "Streaming response ended before any complete data was received"？
+
+这是上游没有返回有效 SSE 导致的。最常见原因：**把 Anthropic 原生端点当成了 OpenAI 端点**（或反之）。
+
+1. 确认该供应商的「上游协议」是否正确：OpenAI 兼容端点选 OpenAI，`/v1/messages` 端点选 Anthropic 原生（baseUrl 含 `/anthropic` 会自动识别）。
+2. 确认 Base URL 与模型名与上游真实接口一致；用控制台「🔌 测试连接」验证。
+3. 新版代理已加固：上游返回非 SSE 时会回 502 并附原文（而非给你一个空流）。若仍报此错，查看控制台/`proxy.log` 里的 `stream upstream` 信息。
 
 ### Q：切换供应商后 Claude Code 没有变化？
 
@@ -349,6 +374,7 @@ netstat -ano | findstr 18101
       "authType": "bearer",       // bearer 或 none
       "apiKey": "sk-xxx",
       "model": "big-pickle",      // 发给上游的 model 字段
+      "protocol": "openai",       // openai（默认）| anthropic（原生直通）| 留空=按 baseUrl 自动识别
       "extraHeaders": {           // 额外请求头（JSON 对象）
         "User-Agent": "opencode/latest/1.18.18/cli",
         "x-opencode-client": "cli"
@@ -388,15 +414,15 @@ netstat -ano | findstr 18101
 | 文件 | 作用 |
 |------|------|
 | `proxy.mjs` | 代理核心程序（零依赖 Node，供应商抽象层 + Anthropic↔OpenAI 转换） |
-| `config.json` | 运行时配置（端口 + 供应商列表，保存 API Key；含真实 Key 不入库，本地生成） |
-| `config.sample.json` | 脱敏配置模板（复制为 `config.json` 后填入真实 Key） |
+| `config.json` | 运行时配置（端口 + 供应商列表，保存 API Key） |
 | `console/index.html` | Web 控制台界面（浏览器打开，零 CDN 离线可用） |
 | `start.cmd` | Windows 双击启动（后台运行 + 自动开浏览器） |
 | `stop.cmd` | Windows 双击停止（按端口杀进程） |
-| `start.sh` | Linux/macOS 启动脚本（nohup 后台，日志 logs/proxy.log） |
-| `stop.sh` | Linux/macOS 停止脚本（按端口杀进程） |
+| `start-proxy.ps1` | PowerShell 启动脚本（高级参数支持） |
+| `stop-proxy.ps1` | PowerShell 停止脚本 |
 | `README.md` | 项目简介和快速参考 |
 | `USAGE.md` | 本使用说明 |
+| `legacy/` | 原始 claude-zen-proxy.mjs 备份（可删除） |
 
 ---
 

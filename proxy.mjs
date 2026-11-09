@@ -16,11 +16,6 @@ const CONSOLE_INDEX = path.join(CONSOLE_DIR, 'index.html');
 // 可选：RELOAD_MODE='cache'（默认，读内存，面板保存后即时生效）| 'disk'（每请求读盘，防御手工改文件）
 const RELOAD_MODE = (process.env.RELOAD_MODE || 'cache').toLowerCase();
 
-// 请求体上限与上游超时（B2，可用环境变量覆盖）
-const MAX_BODY_BYTES = parseInt(process.env.PROXY_MAX_BODY || String(10 * 1024 * 1024), 10);      // /v1/messages body 上限，默认 10MB
-const UPSTREAM_TIMEOUT_MS = parseInt(process.env.PROXY_UPSTREAM_TIMEOUT || '120000', 10);         // 非流式上游总超时，默认 120s
-const STREAM_IDLE_TIMEOUT_MS = parseInt(process.env.PROXY_STREAM_IDLE_TIMEOUT || '60000', 10);    // 流式空闲超时（无数据断开），默认 60s
-
 // ---------------------------------------------------------------------------
 // 默认播种配置（首次无 config.json 时写入）
 // ---------------------------------------------------------------------------
@@ -92,19 +87,6 @@ function builtinConfig() {
   return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
 }
 
-// 配置损坏重建时，尽力从既有配置/备份恢复安全字段（authToken/host），防止鉴权被静默关闭
-function recoverSecurityFields() {
-  for (const f of [BACKUP_PATH, CONFIG_PATH]) {
-    try {
-      if (!fs.existsSync(f)) continue;
-      const c = JSON.parse(fs.readFileSync(f, 'utf8'));
-      const g = (c && c.global) || {};
-      if (g.authToken || g.host) return { authToken: String(g.authToken || ''), host: String(g.host || '') };
-    } catch { /* try next */ }
-  }
-  return null;
-}
-
 function loadConfig() {
   try {
     if (!fs.existsSync(CONFIG_PATH)) {
@@ -130,13 +112,6 @@ function loadConfig() {
       }
     }
     const seed = builtinConfig();
-    // 损坏重建不得静默关闭鉴权或改变监听范围：恢复安全字段后再落盘
-    const rec = recoverSecurityFields();
-    if (rec) {
-      if (rec.authToken) seed.global.authToken = rec.authToken;
-      if (rec.host) seed.global.host = rec.host;
-      log('已从既有配置恢复安全字段 (authToken/host)');
-    }
     try {
       writeConfigAtomic(seed);
       log('已重新播种默认配置');
@@ -181,6 +156,17 @@ function currentConfig() {
   return inMemory.config;
 }
 
+// 判定上游协议：openai（默认）或 anthropic（原生直通）
+// 优先级：显式 protocol > type==='anthropic' > baseUrl 含 /anthropic > openai
+function detectProtocol(p) {
+  const explicit = String(p.protocol || '').toLowerCase();
+  if (explicit === 'anthropic' || explicit === 'openai') return explicit;
+  if (String(p.type || '').toLowerCase() === 'anthropic') return 'anthropic';
+  const url = String(p.baseUrl || '').toLowerCase();
+  if (url.includes('/anthropic')) return 'anthropic';
+  return 'openai';
+}
+
 // 规范化 provider：去 baseUrl 尾部 '/'，补默认字段
 function normalizeProvider(p) {
   if (!p) return null;
@@ -195,6 +181,7 @@ function normalizeProvider(p) {
     model: p.model || '',
     extraHeaders: (p.extraHeaders && typeof p.extraHeaders === 'object') ? p.extraHeaders : {},
     keepAnthropicAuth: !!p.keepAnthropicAuth,
+    protocol: detectProtocol(p),
   };
 }
 
@@ -215,113 +202,6 @@ function activeProvider() {
 // opencode/zen 上游需要 x-opencode-session 会话头，缺失返回 MissingSessionID
 const opencodeSession = () => `ses_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
 
-// 登录鉴权：global.authToken（共享令牌）。空令牌 => 不鉴权（内网直连不变）
-function authToken() {
-  if (process.env.PROXY_AUTH_TOKEN) return process.env.PROXY_AUTH_TOKEN;
-  const c = currentConfig() || inMemory.config;
-  return (c.global && c.global.authToken) || '';
-}
-function requireAuth(req) {
-  const t = authToken();
-  if (!t) return true; // 未设令牌 => 不鉴权（内网直连不变）
-  const got = req.headers['x-api-key']
-    || (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
-  return !!got && got === t;
-}
-
-// 判定监听地址是否回环
-function isLoopbackHost(host) {
-  if (!host) return true;
-  const h = String(host).toLowerCase();
-  if (h === 'localhost' || h === '::1' || h.startsWith('127.')) return true;
-  return false;
-}
-
-// 启动安全校验：非回环监听（对外暴露）且未设鉴权令牌 => fail-closed 拒绝启动
-function assertListenSecurity() {
-  const host = (inMemory.config && inMemory.config.global && inMemory.config.global.host) || '127.0.0.1';
-  if (!isLoopbackHost(host) && !authToken()) {
-    console.error('[green-proxy] 安全拒绝: 监听地址 ' + host + ' 非仅回环且未配置 authToken（global.authToken 或 PROXY_AUTH_TOKEN）。');
-    console.error('[green-proxy] 代理拒绝启动：对外监听必须配置鉴权令牌，防止无鉴权暴露。');
-    process.exit(1);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 限流 / 防爆破（内存实现，按 IP；参数可用环境变量覆盖）
-//   PROXY_RATE_WINDOW_MS  失败统计窗口，默认 300000（5 分钟）
-//   PROXY_RATE_MAX_FAILS  窗口内最大鉴权失败次数，默认 5
-//   PROXY_RATE_BLOCK_MS   触发后封锁时长，默认 900000（15 分钟）
-//   PROXY_RATE_MAX_REQ    /v1/messages 每 IP 每分钟请求上限，默认 0 = 不限
-//   PROXY_TRUST_PROXY     =1 时信任 X-Forwarded-For（置于反代之后时启用）
-// ---------------------------------------------------------------------------
-const RATE_WINDOW_MS = parseInt(process.env.PROXY_RATE_WINDOW_MS || '300000', 10);
-const RATE_MAX_FAILS = parseInt(process.env.PROXY_RATE_MAX_FAILS || '5', 10);
-const RATE_BLOCK_MS = parseInt(process.env.PROXY_RATE_BLOCK_MS || '900000', 10);
-const RATE_MAX_REQ = parseInt(process.env.PROXY_RATE_MAX_REQ || '0', 10);
-const TRUST_PROXY = process.env.PROXY_TRUST_PROXY === '1';
-
-const rateState = new Map(); // ip -> { fails: number[], blockedUntil: number, reqs: number[] }
-
-function clientIp(req) {
-  if (TRUST_PROXY) {
-    const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-    if (fwd) return fwd;
-  }
-  return (req.socket && req.socket.remoteAddress) || 'unknown';
-}
-
-function rateEntry(ip) {
-  let e = rateState.get(ip);
-  if (!e) {
-    e = { fails: [], blockedUntil: 0, reqs: [] };
-    rateState.set(ip, e);
-    // 惰性清理：状态条目过多时丢弃已过期项，防止内存无限增长
-    if (rateState.size > 10000) {
-      const now = Date.now();
-      for (const [k, v] of rateState) {
-        if (now - (v.fails[v.fails.length - 1] || 0) > RATE_WINDOW_MS && now - (v.reqs[v.reqs.length - 1] || 0) > 60000 && (!v.blockedUntil || v.blockedUntil < now)) rateState.delete(k);
-      }
-    }
-  }
-  return e;
-}
-
-function pruneRateEntry(e, now) {
-  while (e.fails.length && now - e.fails[0] > RATE_WINDOW_MS) e.fails.shift();
-  while (e.reqs.length && now - e.reqs[0] > 60000) e.reqs.shift();
-}
-
-function isAuthBlocked(ip) {
-  const now = Date.now();
-  const e = rateEntry(ip);
-  pruneRateEntry(e, now);
-  if (e.blockedUntil && e.blockedUntil > now) return true;
-  if (e.blockedUntil && e.blockedUntil <= now) e.blockedUntil = 0;
-  return false;
-}
-
-function noteAuthFail(ip) {
-  const now = Date.now();
-  const e = rateEntry(ip);
-  pruneRateEntry(e, now);
-  e.fails.push(now);
-  if (e.fails.length >= RATE_MAX_FAILS) {
-    e.blockedUntil = now + RATE_BLOCK_MS;
-    e.fails = [];
-    log(`rate-limit: IP ${ip} 鉴权失败过多，封锁 ${Math.round(RATE_BLOCK_MS / 60000)} 分钟`);
-  }
-}
-
-function noteRequest(ip) {
-  if (!RATE_MAX_REQ) return false;
-  const now = Date.now();
-  const e = rateEntry(ip);
-  pruneRateEntry(e, now);
-  e.reqs.push(now);
-  return e.reqs.length > RATE_MAX_REQ;
-}
-
 // 组装上游请求头
 function upstreamHeaders(provider, clientAuth) {
   const headers = { 'Content-Type': 'application/json' };
@@ -329,6 +209,14 @@ function upstreamHeaders(provider, clientAuth) {
     headers['Authorization'] = `Bearer ${provider.apiKey}`;
   } else if (provider.authType === 'none' && provider.keepAnthropicAuth && clientAuth) {
     headers['Authorization'] = clientAuth.startsWith('Bearer ') ? clientAuth : `Bearer ${clientAuth}`;
+  }
+  // Anthropic 原生上游：补 anthropic-version 与 x-api-key（兼容只认 x-api-key 的网关）
+  if (provider.protocol === 'anthropic') {
+    headers['anthropic-version'] = '2023-06-01';
+    const key = provider.authType === 'bearer' && provider.apiKey
+      ? provider.apiKey
+      : String(clientAuth || '').replace(/^Bearer\s+/i, '');
+    if (key) headers['x-api-key'] = key;
   }
   // opencode/zen 免费档强制要求会话头
   if (/opencode\.ai\/zen/i.test(String(provider.baseUrl)) && !(provider.extraHeaders && provider.extraHeaders['x-opencode-session'])) {
@@ -474,7 +362,6 @@ function sendJson(res, status, obj) {
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(body),
-    'X-Content-Type-Options': 'nosniff',
   });
   res.end(body);
 }
@@ -482,28 +369,103 @@ function sendJson(res, status, obj) {
 // ---------------------------------------------------------------------------
 // 上游调用（供应商化）
 // ---------------------------------------------------------------------------
-// 日志/错误透传脱敏：打码疑似密钥片段并截断，避免上游错误体泄露凭证
-function sanitizeUpstreamSnippet(text) {
-  return String(text || '')
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-****')
-    .replace(/Bearer\s+[A-Za-z0-9._-]{8,}/gi, 'Bearer ****')
-    .replace(/(?:ark-|ghp_)[A-Za-z0-9_-]{8,}/g, '$1****')
-    .slice(0, 200);
-}
-
 async function upstreamChat(body, provider, clientAuth) {
   const url = `${provider.baseUrl}/chat/completions`;
   const res = await fetch(url, {
     method: 'POST',
     headers: upstreamHeaders(provider, clientAuth),
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`upstream ${res.status}: ${sanitizeUpstreamSnippet(text)}`);
+    throw new Error(`upstream ${res.status}: ${text.slice(0, 500)}`);
   }
   return { status: res.status, text };
+}
+
+// 构造 Anthropic 上游 /v1/messages 地址（baseUrl 已含 /v1 时不重复）
+function anthropicMessagesUrl(baseUrl) {
+  const b = String(baseUrl || '').replace(/\/+$/, '');
+  if (/\/v1$/i.test(b)) return `${b}/messages`;
+  return `${b}/v1/messages`;
+}
+
+// Anthropic 原生直通：请求体原样转发（model 以 provider 为权威）。
+// 覆盖 BigModel(/api/anthropic)、Anthropic 官方、以及其它 Anthropic 兼容网关。
+async function handleAnthropicPassthrough(req, res, anthropic, provider, clientAuth, model) {
+  const url = anthropicMessagesUrl(provider.baseUrl);
+  const payload = { ...anthropic, model };
+  const stream = !!anthropic.stream;
+  try {
+    const upstreamRes = await fetch(url, {
+      method: 'POST',
+      headers: upstreamHeaders(provider, clientAuth),
+      body: JSON.stringify(payload),
+    });
+    if (!upstreamRes.ok) {
+      const t = await upstreamRes.text();
+      log(`anthropic upstream ${upstreamRes.status}: ${t.slice(0, 300)}`);
+      sendJson(res, 502, {
+        type: 'error',
+        error: { type: 'api_error', message: `upstream ${upstreamRes.status}: ${t.slice(0, 500)}` },
+      });
+      return;
+    }
+    if (!stream) {
+      const text = await upstreamRes.text();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(text);
+      log('anthropic passthrough (non-stream) done');
+      return;
+    }
+    // 流式：逐字节透传上游 Anthropic SSE（保留 thinking / ping / cache 等全部事件）
+    res.writeHead(200, {
+      'Content-Type': upstreamRes.headers.get('content-type') || 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+    const reader = upstreamRes.body.getReader();
+    const onClose = () => { try { reader.cancel(); } catch { /* ignore */ } };
+    req.on('close', onClose);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) res.write(Buffer.from(value));
+      }
+    } finally {
+      req.off('close', onClose);
+    }
+    res.end();
+    log('anthropic passthrough (stream) done');
+  } catch (e) {
+    log('anthropic upstream error:', e.message);
+    if (!res.headersSent) sendJson(res, 502, { type: 'error', error: { type: 'api_error', message: e.message } });
+    else res.end();
+  }
+}
+
+// 上游对 stream=true 却回了普通 JSON（非 SSE）时，用 Anthropic SSE 完整承载内容，
+// 避免下游收到"空流"而报 Streaming response ended before any complete data was received。
+function emitAnthropicSseFromOpenAI(res, parsed, model) {
+  const msg = anthropicResponse(parsed, model);
+  res.write(sseEncode({
+    type: 'message_start',
+    message: { ...msg, content: [], stop_reason: null, usage: { input_tokens: msg.usage.input_tokens, output_tokens: 0 } },
+  }));
+  let idx = 0;
+  for (const block of msg.content) {
+    res.write(sseEncode({ type: 'content_block_start', index: idx, content_block: { ...block, ...(block.type === 'tool_use' ? { input: {} } : { text: '' }) } }));
+    if (block.type === 'text' && block.text) {
+      res.write(sseEncode({ type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: block.text } }));
+    } else if (block.type === 'tool_use') {
+      res.write(sseEncode({ type: 'content_block_delta', index: idx, delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input || {}) } }));
+    }
+    res.write(sseEncode({ type: 'content_block_stop', index: idx }));
+    idx += 1;
+  }
+  res.write(sseEncode({ type: 'message_delta', delta: { stop_reason: msg.stop_reason, stop_sequence: null }, usage: { output_tokens: msg.usage.output_tokens } }));
+  res.write(sseEncode({ type: 'message_stop' }));
 }
 
 async function handleMessages(req, res, rawBody, apiKey) {
@@ -561,6 +523,12 @@ async function handleMessages(req, res, rawBody, apiKey) {
 
   const headers = upstreamHeaders(provider, apiKey);
 
+  // Anthropic 原生上游：直接直通 /v1/messages（保留 thinking 块、工具、缓存等全部语义）
+  if (provider.protocol === 'anthropic') {
+    await handleAnthropicPassthrough(req, res, anthropic, provider, apiKey, model);
+    return;
+  }
+
   // Non-streaming
   if (!stream) {
     try {
@@ -574,28 +542,42 @@ async function handleMessages(req, res, rawBody, apiKey) {
     return;
   }
 
-  // Streaming: forward OpenAI SSE, convert chunks to Anthropic SSE-ish
-  // 流式空闲超时：每收到数据重置计时，超过 STREAM_IDLE_TIMEOUT_MS 无数据则中止，防悬挂连接
-  const streamAbort = new AbortController();
-  let idleTimer = setTimeout(() => streamAbort.abort(new Error(`stream idle over ${STREAM_IDLE_TIMEOUT_MS}ms`)), STREAM_IDLE_TIMEOUT_MS);
-  const bumpIdle = () => {
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => streamAbort.abort(new Error(`stream idle over ${STREAM_IDLE_TIMEOUT_MS}ms`)), STREAM_IDLE_TIMEOUT_MS);
-  };
+  // Streaming: forward OpenAI SSE, convert chunks to Anthropic SSE
   try {
     const url = `${provider.baseUrl}/chat/completions`;
     const upstreamRes = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(openaiBody),
-      signal: streamAbort.signal,
     });
     if (!upstreamRes.ok) {
       const t = await upstreamRes.text();
-      clearTimeout(idleTimer);
-      sendJson(res, 502, { type: 'error', error: { type: 'api_error', message: `upstream ${upstreamRes.status}: ${sanitizeUpstreamSnippet(t)}` } });
+      sendJson(res, 502, { type: 'error', error: { type: 'api_error', message: `upstream ${upstreamRes.status}: ${t.slice(0, 300)}` } });
       return;
     }
+
+    // 关键加固：上游对 stream=true 却回了非 SSE（JSON 错误体或完整回复）。
+    // 旧逻辑无条件当 SSE 解析，导致下游收到空流 ->
+    // "Streaming response ended before any complete data was received."
+    const ctype = String(upstreamRes.headers.get('content-type') || '');
+    if (!ctype.includes('text/event-stream')) {
+      const t = await upstreamRes.text();
+      let parsed = null;
+      try { parsed = JSON.parse(t); } catch { /* ignore */ }
+      if (!parsed || parsed.error || parsed.code || !Array.isArray(parsed.choices)) {
+        const msg = (parsed && (parsed.error?.message || parsed.msg || parsed.message)) || t.slice(0, 300) || 'upstream returned non-SSE body';
+        log('stream upstream non-SSE error:', t.slice(0, 300));
+        sendJson(res, 502, { type: 'error', error: { type: 'api_error', message: `上游未返回 SSE（请检查 Base URL / 模型 / 协议设置）: ${msg}` } });
+        return;
+      }
+      // 供应商忽略 stream 参数、直接返回完整 JSON：转成合规的 Anthropic SSE
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+      emitAnthropicSseFromOpenAI(res, parsed, model);
+      res.end();
+      log('stream converted from non-SSE JSON');
+      return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     // Anthropic message_start
     res.write(sseEncode({
@@ -612,16 +594,38 @@ async function handleMessages(req, res, rawBody, apiKey) {
       },
     }));
     let full = '';
-    let toolIdx = 0;          // 文本块固定 index 0, 工具块从 1 起
+    let nextIndex = 0;
+    let textIndex = -1;       // 文本块按需开启
+    let textClosed = false;
     let stopReason = 'end_turn';
-    const openedTools = new Map(); // toolCallIndex -> anthIndex
+    const openedTools = new Map(); // openai tool index -> { anthIndex, closed }
     const reader = upstreamRes.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
+
+    const openText = () => {
+      if (textIndex >= 0) return;
+      textIndex = nextIndex++;
+      res.write(sseEncode({ type: 'content_block_start', index: textIndex, content_block: { type: 'text', text: '' } }));
+    };
+    const closeText = () => {
+      if (textIndex >= 0 && !textClosed) {
+        res.write(sseEncode({ type: 'content_block_stop', index: textIndex }));
+        textClosed = true;
+      }
+    };
+    const closeTools = () => {
+      for (const t of openedTools.values()) {
+        if (!t.closed) {
+          res.write(sseEncode({ type: 'content_block_stop', index: t.anthIndex }));
+          t.closed = true;
+        }
+      }
+    };
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      bumpIdle();
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split('\n');
       buf = lines.pop();
@@ -631,23 +635,28 @@ async function handleMessages(req, res, rawBody, apiKey) {
         if (!data || data === '[DONE]') continue;
         let chunk;
         try { chunk = JSON.parse(data); } catch { continue; }
+        if (chunk.error) {
+          log('stream upstream error chunk:', JSON.stringify(chunk.error).slice(0, 300));
+        }
         const c0 = chunk.choices && chunk.choices[0];
         if (!c0) continue;
         const delta = c0.delta || {};
         const piece = delta.content || '';
         if (piece) {
+          openText();
           full += piece;
-          res.write(sseEncode({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: piece } }));
+          res.write(sseEncode({ type: 'content_block_delta', index: textIndex, delta: { type: 'text_delta', text: piece } }));
         }
         // tool_calls (indexed streaming)
         if (Array.isArray(delta.tool_calls)) {
           for (const tcall of delta.tool_calls) {
             const oidx = tcall.index ?? 0;
-            let anthIndex = openedTools.get(oidx);
-            if (anthIndex === undefined) {
-              toolIdx += 1;
-              anthIndex = toolIdx;
-              openedTools.set(oidx, anthIndex);
+            let entry = openedTools.get(oidx);
+            if (entry === undefined) {
+              closeText(); // 文本块必须在工具块之前收尾
+              const anthIndex = nextIndex++;
+              entry = { anthIndex, closed: false };
+              openedTools.set(oidx, entry);
               const fn = tcall.function || {};
               res.write(sseEncode({
                 type: 'content_block_start',
@@ -664,7 +673,7 @@ async function handleMessages(req, res, rawBody, apiKey) {
             if (argDelta) {
               res.write(sseEncode({
                 type: 'content_block_delta',
-                index: anthIndex,
+                index: entry.anthIndex,
                 delta: { type: 'input_json_delta', partial_json: argDelta },
               }));
             }
@@ -672,14 +681,15 @@ async function handleMessages(req, res, rawBody, apiKey) {
         }
         if (c0.finish_reason === 'tool_calls') {
           stopReason = 'tool_use';
-          for (const oidx of openedTools.keys()) {
-            res.write(sseEncode({ type: 'content_block_stop', index: openedTools.get(oidx) }));
-          }
+          closeText();
+          closeTools();
+        } else if (c0.finish_reason === 'length') {
+          stopReason = 'max_tokens';
         }
       }
     }
-    // 流正常结束，清理空闲计时器
-    clearTimeout(idleTimer);
+    closeText();
+    closeTools();
     // message_delta (stop)
     res.write(sseEncode({
       type: 'message_delta',
@@ -690,7 +700,6 @@ async function handleMessages(req, res, rawBody, apiKey) {
     res.end();
     log('stream done, chars:', full.length, 'tools:', openedTools.size);
   } catch (e) {
-    clearTimeout(idleTimer);
     log('stream upstream error:', e.message);
     if (!res.headersSent) sendJson(res, 502, { type: 'error', error: { type: 'api_error', message: e.message } });
     else res.end();
@@ -714,24 +723,11 @@ function readBody(req) {
   });
 }
 
-// 脱敏配置：GET /api/config 返回时对 apiKey 打码，避免泄露明文密钥
-function desensitizeConfig(cfg) {
-  const copy = JSON.parse(JSON.stringify(cfg));
-  const provs = Array.isArray(copy.providers) ? copy.providers : [];
-  for (const p of provs) {
-    if (p && typeof p.apiKey === 'string' && p.apiKey.length > 0) {
-      p.apiKey = p.apiKey.slice(0, 4) + '****' + p.apiKey.slice(-4);
-      p.apiKeyRedacted = true;
-    }
-  }
-  return copy;
-}
-
 async function handleApi(req, res, pathname) {
-  // GET /api/config —— 脱敏返回（避免泄露明文 apiKey）
+  // GET /api/config
   if (req.method === 'GET' && pathname === '/api/config') {
     const cfg = currentConfig() || inMemory.config;
-    return sendJson(res, 200, desensitizeConfig(cfg));
+    return sendJson(res, 200, cfg);
   }
 
   // PUT /api/config —— 面板保存（唯一的写盘点）
@@ -746,14 +742,6 @@ async function handleApi(req, res, pathname) {
       return sendJson(res, 400, { ok: false, message: 'providers 数组缺失' });
     }
     if (!body.global) body.global = {};
-    // 合入：前端对已保存(脱敏)的 apiKey 剔除该字段；对缺失 apiKey 的 provider 沿用内存旧 key，避免脱敏占位写盘破坏凭证
-    const prev = (inMemory.config && inMemory.config.providers) || [];
-    for (const nb of body.providers) {
-      if (nb && !('apiKey' in nb)) {
-        const old = prev.find((x) => x && x.id === nb.id);
-        if (old && old.apiKey) nb.apiKey = old.apiKey;
-      }
-    }
     // 写盘前轮转备份（覆盖式，1 份）
     try {
       if (fs.existsSync(CONFIG_PATH)) fs.copyFileSync(CONFIG_PATH, BACKUP_PATH);
@@ -806,12 +794,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, result);
   }
 
-  // POST /api/write-claude-settings —— 把选定 provider 写回 ~/.claude/settings.json（仅回环监听可用，避免外网覆盖他人 settings.json）
-  if (req.method === 'POST' && pathname === '/api/write-claude-settings') {
-    const lh = (inMemory.config && inMemory.config.global && inMemory.config.global.host) || '127.0.0.1';
-    if (!isLoopbackHost(lh)) {
-    return sendJson(res, 404, { ok: false, message: 'not_available: /api/write-claude-settings 仅回环监听可用' });
-    }
+  // POST /api/write-claude-settings —— 把选定 provider 写回 ~/.claude/settings.json
   if (req.method === 'POST' && pathname === '/api/write-claude-settings') {
     let body;
     try { body = JSON.parse(await readBody(req)); } catch { body = {}; }
@@ -826,13 +809,47 @@ async function handleApi(req, res, pathname) {
       return sendJson(res, 500, { ok: false, message: e.message });
     }
   }
-}
 
   return sendJson(res, 404, { ok: false, message: 'unknown api: ' + req.method + ' ' + pathname });
 }
 
 async function testProvider(provider) {
   const t0 = Date.now();
+
+  // Anthropic 原生上游：直接用 /v1/messages 探测
+  if (provider.protocol === 'anthropic') {
+    const body = {
+      model: provider.model || 'claude-3-5-sonnet-latest',
+      max_tokens: 8,
+      stream: false,
+      messages: [{ role: 'user', content: 'ping' }],
+    };
+    try {
+      const r = await fetch(anthropicMessagesUrl(provider.baseUrl), {
+        method: 'POST',
+        headers: upstreamHeaders(provider, ''),
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15000),
+      });
+      const text = await r.text();
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch { /* ignore */ }
+      const ok = r.ok && !parsed?.error;
+      const content = parsed?.content?.find?.((b) => b.type === 'text')?.text
+        || parsed?.content?.[0]?.text
+        || parsed?.content?.[0]?.thinking
+        || '';
+      return {
+        ok,
+        status: r.status,
+        latencyMs: Date.now() - t0,
+        message: ok ? (String(content).slice(0, 80) || 'ok') : (parsed?.error?.message || parsed?.msg || text.slice(0, 300)),
+      };
+    } catch (e) {
+      return { ok: false, status: 0, latencyMs: Date.now() - t0, message: e.message };
+    }
+  }
+
   // 1. Try GET {baseUrl}/models
   try {
     const r = await fetch(`${provider.baseUrl}/models`, {
@@ -865,13 +882,15 @@ async function testProvider(provider) {
     const ok = r.ok;
     let parsed = null;
     try { parsed = JSON.parse(text); } catch { /* ignore */ }
+    // 200 但非 OpenAI 结构（例如误填 Anthropic 端点）视作失败，给出明确提示
+    const validShape = ok && Array.isArray(parsed?.choices);
     return {
-      ok,
+      ok: validShape,
       status: r.status,
       latencyMs: Date.now() - t0,
-      message: ok
+      message: validShape
         ? (parsed?.choices?.[0]?.message?.content?.slice(0, 80) || 'ok')
-        : (parsed?.error?.message || text.slice(0, 300)),
+        : (parsed?.error?.message || parsed?.msg || text.slice(0, 300)),
     };
   } catch (e) {
     return { ok: false, status: 0, latencyMs: Date.now() - t0, message: e.message };
@@ -934,28 +953,12 @@ const server = http.createServer(async (req, res) => {
   const rawUrl = req.url || '/';
   const pathname = rawUrl.split('?')[0];
   const apiKey = clientAuthOf(req);
-  const rip = clientIp(req);
-
-  // 防爆破：被封禁 IP 一律 429
-  if (isAuthBlocked(rip)) {
-    return sendJson(res, 429, { type: 'error', error: { type: 'rate_limit_error', message: 'too many requests; retry later' } });
-  }
-  // 统一登录鉴权：若设置了 global.authToken，所有端点都需携带该令牌
-  if (!requireAuth(req)) {
-    noteAuthFail(rip);
-    return sendJson(res, 401, { type: 'error', error: { type: 'auth_error', message: '需要 Authorization: Bearer <global.authToken> 或 x-api-key 访问' } });
-  }
 
   // Admin 分支
   if (pathname === '/console' || pathname === '/console/') {
     try {
       const html = fs.readFileSync(CONSOLE_INDEX, 'utf8');
-      res.writeHead(200, {
-        'Content-Type': 'text/html; charset=utf-8',
-        'X-Content-Type-Options': 'nosniff',
-        'X-Frame-Options': 'DENY',
-        'Referrer-Policy': 'no-referrer',
-      });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(html);
     } catch (e) {
       sendJson(res, 500, { type: 'error', error: { type: 'api_error', message: 'console/index.html not found: ' + e.message } });
@@ -979,8 +982,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Anthropic 侧（日志只记 pathname，不带 query，避免泄露 URL 中的敏感参数）
-  log(`REQ ${req.method} ${pathname} | ip=${rip} x-api-key=${req.headers['x-api-key'] ? 'present' : 'none'} auth=${req.headers['authorization'] ? 'present' : 'none'} ua=${req.headers['user-agent']} xoc=${req.headers['x-opencode-client']}`);
+  // Anthropic 侧
+  log(`REQ ${req.method} ${rawUrl} | x-api-key=${req.headers['x-api-key'] ? 'present' : 'none'} auth=${req.headers['authorization'] ? 'present' : 'none'} ua=${req.headers['user-agent']} xoc=${req.headers['x-opencode-client']}`);
 
   if (req.method === 'GET' && pathname === '/v1/models') {
     const act = activeProvider();
@@ -990,20 +993,9 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { input_tokens: 0 });
   }
   if (req.method === 'POST' && pathname === '/v1/messages') {
-    if (noteRequest(rip)) {
-      return sendJson(res, 429, { type: 'error', error: { type: 'rate_limit_error', message: 'request rate limit exceeded' } });
-    }
     let body = '';
-    let tooLarge = false;
-    req.on('data', (c) => {
-      body += c;
-      if (!tooLarge && body.length > MAX_BODY_BYTES) {
-        tooLarge = true;
-        sendJson(res, 413, { type: 'error', error: { type: 'request_too_large', message: `request body exceeds ${MAX_BODY_BYTES} bytes` } });
-        req.destroy();
-      }
-    });
-    req.on('end', () => { if (!tooLarge) handleMessages(req, res, body, apiKey); });
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => handleMessages(req, res, body, apiKey));
     return;
   }
   sendJson(res, 404, { type: 'error', error: { type: 'not_found_error', message: `not found: ${req.method} ${rawUrl}` } });
@@ -1017,7 +1009,6 @@ function start() {
   inMemory.port = inMemory.config.global.port || 18101;
   refreshActiveProvider();
   const act = activeProvider();
-  assertListenSecurity();
 
   server.listen(inMemory.port, inMemory.config.global.host || '127.0.0.1', () => {
     const addr = server.address();
